@@ -48,16 +48,9 @@ import {
   type SyncState,
   type PendingOpPayload,
 } from '@/lib/sync'
-import { AnimatePresence, LayoutGroup, motion } from 'framer-motion'
-import {
-  FileText,
-  LayoutDashboard,
-  LogOut,
-  Map as MapIcon,
-  UserRound,
-  Users,
-  type LucideIcon,
-} from 'lucide-react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { LogOut } from 'lucide-react'
+import BottomNav, { type NavKey } from '@/components/BottomNav'
 
 import ReactDOM from "react-dom"
 import {
@@ -99,7 +92,7 @@ const fadeInVariants = {
 type LeaderboardCategory = 'bonus' | 'speed' | 'quality'
 type ReactionEmoji = '🔥' | '💡' | '💪'
 type AchievementKey = 'five_streak' | 'route_master' | 'client_favorite'
-type View = 'route' | 'board' | 'hq' | 'docs' | 'profile'
+type View = NavKey
 type BoardTab = 'clients' | 'admin'
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>
@@ -2309,17 +2302,17 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     const todaysJobs = jobs.filter((job) => job.date === activeDate)
     return Math.min(1, todaysJobs.length / maxJobs)
   }, [jobs, activeDate, policy.maxJobsPerDay])
-  const hasFreshKudos = useMemo(
-    () =>
-      SAMPLE_KUDOS.some((entry) => {
-        const timestamp = new Date(entry.timestamp).getTime()
-        if (Number.isNaN(timestamp)) {
-          return false
-        }
-        return Date.now() - timestamp < 1000 * 60 * 60 * 24 * 3
-      }),
-    [],
-  )
+  const unreadKudos = useMemo(() => {
+    const now = Date.now()
+    return SAMPLE_KUDOS.reduce((count, entry) => {
+      const timestamp = new Date(entry.timestamp).getTime()
+      if (Number.isNaN(timestamp)) {
+        return count
+      }
+      return now - timestamp < 1000 * 60 * 60 * 24 * 3 ? count + 1 : count
+    }, 0)
+  }, [])
+  const pendingSync = syncStatus.queued ?? 0
   const handleViewSelect = useCallback(
     (next: View) => {
       setView(next)
@@ -3325,7 +3318,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
           )}
         </motion.div>
       )}
-      {view === 'docs' && (
+      {view === 'inventory' && (
         <motion.div
           variants={fadeInVariants}
           initial="hidden"
@@ -3334,24 +3327,16 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         >
           <Card className={`rounded-2xl ${THEME.panel}`}>
             <CardHeader>
-              <CardTitle>Playbook</CardTitle>
+              <CardTitle>Inventory Pulse</CardTitle>
               <CardDescription className={THEME.subtext}>
-                Guardrails and reminders for the seasonal crew dispatch.
+                Keep the trucks stocked and ready before the crews roll out.
               </CardDescription>
             </CardHeader>
             <CardContent className={`space-y-3 text-sm ${THEME.subtext}`}>
-              <p>
-                • {policy.maxJobsPerDay} {jobsPerDayLabel} maximum per calendar day. Use the Both Crews slot when the full team is required and leave the rest of the day open.
-              </p>
-              <p>
-                • Keep the install calendar balanced—use the Both Crews slot when the full team is required and leave the rest of the day open.
-              </p>
-              <p>
-                • Suspended clients ({blockedClientSummary}) remain off the board until finance clears them.
-              </p>
-              <p>
-                • VIP neighborhoods: Country Ridge, Cherry Hills, Patriot Sub. Flagged automatically when loaded from CSV.
-              </p>
+              <p>• Confirm bulb crates, clips, and timers are staged for the first three stops.</p>
+              <p>• Flag any broken reels in the shop log so dispatch can reassign inventory.</p>
+              <p>• Suspended clients ({blockedClientSummary}) remain off the board until finance clears them.</p>
+              <p>• Keep {policy.maxJobsPerDay} {jobsPerDayLabel} kitted pull sheets ready to avoid overtime scrambles.</p>
             </CardContent>
           </Card>
         </motion.div>
@@ -3369,10 +3354,11 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
           </div>
         </main>
         <BottomNav
-          activeView={view}
-          onSelect={handleViewSelect}
+          active={view}
+          setActive={handleViewSelect}
           routeProgress={routeProgress}
-          hasCrewBadge={hasFreshKudos}
+          unreadKudos={unreadKudos}
+          pendingSync={pendingSync}
         />
       </div>
       <AnimatePresence>
@@ -3761,120 +3747,6 @@ function LayerHost() {
         document.body,
       )}
     </>
-  )
-}
-
-type BottomNavProps = {
-  activeView: View
-  onSelect: (view: View) => void
-  routeProgress: number
-  hasCrewBadge: boolean
-}
-
-function BottomNav({ activeView, onSelect, routeProgress, hasCrewBadge }: BottomNavProps) {
-  const navItems: { key: View; label: string; icon: LucideIcon; badge?: boolean; showProgress?: boolean }[] =
-    [
-      { key: 'route', label: 'Route', icon: MapIcon, showProgress: true },
-      { key: 'board', label: 'Board', icon: LayoutDashboard },
-      { key: 'hq', label: 'Crew HQ', icon: Users, badge: hasCrewBadge },
-      { key: 'docs', label: 'Docs', icon: FileText },
-      { key: 'profile', label: 'Profile', icon: UserRound },
-    ]
-  const buttonRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
-      if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-        event.preventDefault()
-        const direction = event.key === 'ArrowRight' ? 1 : -1
-        const total = navItems.length
-        const nextIndex = (index + direction + total) % total
-        buttonRefs.current[nextIndex]?.focus()
-      }
-    },
-    [navItems.length],
-  )
-
-  return (
-    <nav className="fixed inset-x-0 bottom-0 z-40" aria-label="Primary navigation">
-      <div
-        className="mx-auto w-full max-w-3xl px-4"
-        style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)' }}
-      >
-        <div className="relative overflow-hidden rounded-[28px] border border-slate-800/70 bg-slate-950/85 shadow-[0_32px_90px_rgba(5,8,18,0.9)] backdrop-blur-2xl">
-          <LayoutGroup>
-            <div className="grid grid-cols-5 gap-1 px-2 py-2" role="tablist">
-              {navItems.map((item, index) => {
-                const isActive = activeView === item.key
-                const Icon = item.icon
-                return (
-                  <motion.button
-                    key={item.key}
-                    type="button"
-                    onClick={() => onSelect(item.key)}
-                    whileTap={{ scale: 0.94 }}
-                    ref={(node) => {
-                      buttonRefs.current[index] = node
-                    }}
-                    onKeyDown={(event) => handleKeyDown(event, index)}
-                    className="group relative flex min-h-[52px] flex-col items-center justify-center gap-2 rounded-3xl px-3 py-3 text-base font-bold text-slate-100 transition-all duration-200 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 focus-visible:ring-offset-0"
-                    aria-label={item.label}
-                    aria-current={isActive ? 'page' : undefined}
-                  >
-                    {isActive && (
-                      <motion.span
-                        layoutId="nav-active"
-                        className="pointer-events-none absolute inset-0 rounded-3xl border border-amber-300/70 bg-amber-50/90 shadow-[0_14px_32px_rgba(245,158,11,0.35)] before:absolute before:inset-[2px] before:rounded-[inherit] before:bg-gradient-to-t before:from-amber-200/25 before:via-amber-50/10 before:to-transparent before:content-['']"
-                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                      />
-                    )}
-                    <motion.div
-                      animate={{ scale: isActive ? 1.08 : 1 }}
-                      transition={{ type: 'spring', stiffness: 320, damping: 24 }}
-                      className={`relative flex h-10 w-10 items-center justify-center rounded-[18px] transition-all duration-200 ${
-                        isActive
-                          ? 'text-amber-200 opacity-100 drop-shadow-[0_6px_12px_rgba(245,158,11,0.45)]'
-                          : 'text-slate-200 opacity-80 group-hover:opacity-95 group-focus-visible:opacity-95'
-                      }`}
-                    >
-                      <Icon
-                        className="h-5 w-5 transition-transform duration-200 group-hover:scale-[1.08] group-focus-visible:scale-[1.08] md:h-[22px] md:w-[22px]"
-                        aria-hidden="true"
-                      />
-                      {item.badge && (
-                        <motion.span
-                          layoutId={`${item.key}-badge`}
-                          className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full bg-amber-400 ring-2 ring-amber-200/80 ring-offset-1 ring-offset-slate-900 shadow-[0_0_14px_rgba(245,158,11,0.9)]"
-                          initial={{ scale: 0 }}
-                          animate={{ scale: 1 }}
-                        />
-                      )}
-                      {item.showProgress && routeProgress > 0 && (
-                        <motion.span
-                          className="absolute -bottom-1 left-1/2 h-1 w-10 -translate-x-1/2 rounded-full bg-amber-400/70"
-                          style={{ originX: 0.5 }}
-                          initial={{ scaleX: 0 }}
-                          animate={{ scaleX: Math.min(Math.max(routeProgress, 0.15), 1) }}
-                          transition={{ type: 'spring', stiffness: 260, damping: 30 }}
-                        />
-                      )}
-                    </motion.div>
-                    <span
-                      className={`relative mt-1 hidden w-full truncate text-center text-[0.95rem] transition-all duration-200 ease-out md:text-[1.05rem] ${
-                        isActive
-                          ? 'font-extrabold text-amber-200 drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]'
-                          : 'font-semibold tracking-wide text-slate-100/85 group-hover:text-slate-100 group-focus-visible:text-slate-100'
-                      } min-[420px]:block`}
-                    >
-                      {item.label}
-                    </span>
-                  </motion.button>
-                )
-              })}
-            </div>
-          </LayoutGroup>
-        </div>
-      </div>
-    </nav>
   )
 }
 
