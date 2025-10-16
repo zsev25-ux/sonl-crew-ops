@@ -485,6 +485,9 @@ const initialJobs: Job[] = [
     client: 'Byrd Supply Co.',
     scope: 'Warehouse mezzanine install',
     notes: 'Requires forklift on-site by 8am.',
+    address: null,
+    neighborhood: null,
+    zip: null,
   },
   {
     id: 2,
@@ -492,6 +495,10 @@ const initialJobs: Job[] = [
     crew: 'Crew Bravo',
     client: 'City of Ypsilanti',
     scope: 'Holiday lighting run-through',
+    notes: null,
+    address: null,
+    neighborhood: null,
+    zip: null,
   },
   {
     id: 3,
@@ -500,6 +507,9 @@ const initialJobs: Job[] = [
     client: 'Fisher Theatre',
     scope: 'Stage rigging refit',
     notes: 'Safety briefing with venue lead before load-in.',
+    address: null,
+    neighborhood: null,
+    zip: null,
   },
 ]
 
@@ -534,9 +544,9 @@ const createEmptyForm = (
   }
 }
 
-const toOptionalString = (value: string): string | undefined => {
+const toOptionalString = (value: string): string | null => {
   const trimmed = value.trim()
-  return trimmed ? trimmed : undefined
+  return trimmed ? trimmed : null
 }
 
 const toOptionalNumber = (value: string): number | undefined => {
@@ -595,6 +605,9 @@ const sanitizeJobs = (value: unknown, fallback: Job[]): Job[] => {
     return []
   }
 
+  const toNullableString = (input: unknown): string | null =>
+    typeof input === 'string' ? input : null
+
   const sanitized: Job[] = []
   value.forEach((raw, index) => {
     if (!raw || typeof raw !== 'object') {
@@ -618,15 +631,10 @@ const sanitizeJobs = (value: unknown, fallback: Job[]): Job[] => {
       crew,
       client,
       scope,
-      notes:
-        typeof record.notes === 'string' ? record.notes : undefined,
-      address:
-        typeof record.address === 'string' ? record.address : undefined,
-      neighborhood:
-        typeof record.neighborhood === 'string'
-          ? record.neighborhood
-          : undefined,
-      zip: typeof record.zip === 'string' ? record.zip : undefined,
+      notes: toNullableString(record.notes),
+      address: toNullableString(record.address),
+      neighborhood: toNullableString(record.neighborhood),
+      zip: toNullableString(record.zip),
       houseTier:
         typeof record.houseTier === 'number' && Number.isFinite(record.houseTier)
           ? record.houseTier

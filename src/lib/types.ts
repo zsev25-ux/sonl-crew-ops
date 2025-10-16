@@ -7,10 +7,10 @@ export type JobCore = {
   crew: string
   client: string
   scope: string
-  notes?: string
-  address?: string
-  neighborhood?: string
-  zip?: string
+  notes?: string | null
+  address?: string | null
+  neighborhood?: string | null
+  zip?: string | null
   houseTier?: number
   rehangPrice?: number
   lifetimeSpend?: number

@@ -18,6 +18,7 @@ import {
 } from '@/lib/db'
 import type { Job, Policy } from '@/lib/types'
 import { normalizeJobMeta } from '@/lib/jobmeta'
+import { sanitizeAndLog, sanitizeForFirestore, wasSanitized } from '@/lib/sanitize'
 import {
   collection,
   deleteDoc,
@@ -32,9 +33,11 @@ import {
   setDoc,
   type DocumentData,
   type DocumentSnapshot,
+  type FirestoreDataConverter,
   type QueryDocumentSnapshot,
   type Timestamp,
   type Unsubscribe,
+  type WithFieldValue,
 } from 'firebase/firestore'
 import {
   getDownloadURL,
@@ -64,6 +67,25 @@ export type PendingOpPayload =
 
 const BASE_RETRY_DELAY = 1_000
 const MAX_RETRY_DELAY = 5 * 60_000
+
+type JobDocData = Record<string, unknown>
+
+const jobConverter: FirestoreDataConverter<JobDocData> = {
+  toFirestore(data: WithFieldValue<JobDocData>) {
+    return sanitizeForFirestore(data) as DocumentData
+  },
+  fromFirestore(snapshot, options) {
+    return snapshot.data(options) as JobDocData
+  },
+}
+
+const getJobDocRef = (jobId: string | number) => {
+  if (!cloudDb) {
+    throw new Error('Firestore unavailable')
+  }
+  const jobsCollection = collection(cloudDb, 'jobs').withConverter(jobConverter)
+  return doc(jobsCollection, String(jobId))
+}
 
 const initialStatus: SyncStatus =
   typeof navigator !== 'undefined' && navigator.onLine === false ? 'offline' : 'idle'
@@ -202,16 +224,18 @@ const writeRemoteJobsToDexie = async (
       data.meta && typeof data.meta === 'object'
         ? normalizeJobMeta(data.meta)
         : undefined
+    const toNullableString = (input: unknown): string | null =>
+      typeof input === 'string' ? input : null
     const parsed: Job = {
       id: Number.isFinite(jobId) ? jobId : Date.now(),
       date: String(data.date ?? ''),
       crew: String(data.crew ?? 'Crew Alpha'),
       client: String(data.client ?? 'Client'),
       scope: String(data.scope ?? ''),
-      notes: (data.notes as string) ?? undefined,
-      address: (data.address as string) ?? undefined,
-      neighborhood: (data.neighborhood as string) ?? undefined,
-      zip: (data.zip as string) ?? undefined,
+      notes: toNullableString(data.notes),
+      address: toNullableString(data.address),
+      neighborhood: toNullableString(data.neighborhood),
+      zip: toNullableString(data.zip),
       houseTier: typeof data.houseTier === 'number' ? data.houseTier : undefined,
       rehangPrice: typeof data.rehangPrice === 'number' ? data.rehangPrice : undefined,
       lifetimeSpend: typeof data.lifetimeSpend === 'number' ? data.lifetimeSpend : undefined,
@@ -459,43 +483,38 @@ const performJobWrite = async (job: Job, opId: string) => {
   if (!cloudDb) {
     throw new Error('Firestore unavailable')
   }
-  const target = doc(cloudDb, 'jobs', String(job.id))
+  const target = getJobDocRef(job.id)
   const jobPayload: Job = {
     ...job,
     meta: job.meta ? normalizeJobMeta(job.meta) : undefined,
   }
-  await setDoc(
-    target,
-    {
-      ...jobPayload,
-      bothCrews: jobPayload.crew === 'Both Crews',
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
+  const data = sanitizeAndLog(target.path, {
+    ...jobPayload,
+    bothCrews: jobPayload.crew === 'Both Crews',
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+  })
+  await setDoc(target, data, { merge: true })
 }
 
 const performJobDelete = async (jobId: number) => {
   if (!cloudDb) {
     return
   }
-  await deleteDoc(doc(cloudDb, 'jobs', String(jobId))).catch(() => undefined)
+  await deleteDoc(getJobDocRef(jobId)).catch(() => undefined)
 }
 
 const performPolicyUpdate = async (policy: Policy, opId: string) => {
   if (!cloudDb) {
     return
   }
-  await setDoc(
-    doc(cloudDb, 'config', 'policy'),
-    {
-      ...policy,
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
+  const target = doc(cloudDb, 'config', 'policy')
+  const data = sanitizeAndLog(target.path, {
+    ...policy,
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+  })
+  await setDoc(target, data, { merge: true })
 }
 
 const performKudosReact = async (
@@ -507,16 +526,14 @@ const performKudosReact = async (
   if (!cloudDb) {
     return
   }
-  await setDoc(
-    doc(cloudDb, 'kudos', kudosId),
-    {
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-      lastActor: by,
-      [`reactions.${emoji}`]: increment(1),
-    },
-    { merge: true },
-  )
+  const target = doc(cloudDb, 'kudos', kudosId)
+  const data = sanitizeAndLog(target.path, {
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+    lastActor: by,
+    [`reactions.${emoji}`]: increment(1),
+  })
+  await setDoc(target, data, { merge: true })
 }
 
 const performMediaUpload = async (
@@ -553,23 +570,21 @@ const performMediaUpload = async (
   })
 
   const remoteUrl = await getDownloadURL(uploadTask.snapshot.ref)
-  await setDoc(
-    doc(cloudDb, 'jobs', String(jobId), 'media', mediaId),
-    {
-      id: mediaId,
-      jobId,
-      kind: media.kind,
-      mime: media.mime,
-      remoteUrl,
-      path,
-      width: media.width,
-      height: media.height,
-      name: mediaId,
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
+  const target = doc(cloudDb, 'jobs', String(jobId), 'media', mediaId)
+  const data = sanitizeAndLog(target.path, {
+    id: mediaId,
+    jobId,
+    kind: media.kind,
+    mime: media.mime,
+    remoteUrl,
+    path,
+    width: media.width,
+    height: media.height,
+    name: mediaId,
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+  })
+  await setDoc(target, data, { merge: true })
   await db.media.update(mediaId, {
     remoteUrl,
     localBlob: undefined,
@@ -625,6 +640,19 @@ const runOperation = async (op: PendingOpRecord): Promise<void> => {
   }
 }
 
+const sanitizePendingPayload = async (
+  op: PendingOpRecord,
+): Promise<PendingOpRecord> => {
+  if (op.payload === null || op.payload === undefined) {
+    return op
+  }
+  const sanitizedPayload = sanitizeAndLog(`pendingOps/${op.id}`, op.payload)
+  if (wasSanitized(sanitizedPayload)) {
+    await updatePendingOp(op.id, { payload: sanitizedPayload })
+  }
+  return { ...op, payload: sanitizedPayload }
+}
+
 export async function processPendingQueue(force = false): Promise<void> {
   if (!cloudEnabled || !cloudDb) {
     return
@@ -651,8 +679,9 @@ export async function processPendingQueue(force = false): Promise<void> {
 
       for (const op of pending) {
         try {
-          await runOperation(op)
-          await deleteByKey('pendingOps', op.id)
+          const sanitizedOp = await sanitizePendingPayload(op)
+          await runOperation(sanitizedOp)
+          await deleteByKey('pendingOps', sanitizedOp.id)
           await refreshQueuedCount()
           await recordLastSync(Date.now())
         } catch (error) {
@@ -725,6 +754,9 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
       break
     default:
       payload = op
+  }
+  if (payload !== undefined) {
+    payload = sanitizeForFirestore(payload)
   }
   const record: PendingOpRecord = {
     id: randomId(),
