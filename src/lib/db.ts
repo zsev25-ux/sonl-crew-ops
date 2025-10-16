@@ -7,10 +7,10 @@ export type JobRecord = {
   crew: string
   client: string
   scope: string
-  notes?: string
-  address?: string
-  neighborhood?: string
-  zip?: string
+  notes?: string | null
+  address?: string | null
+  neighborhood?: string | null
+  zip?: string | null
   houseTier?: number
   rehangPrice?: number
   lifetimeSpend?: number
@@ -260,6 +260,38 @@ const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
           (record.payload.job.meta as Record<string, unknown>).materials = normalizeMaterials(
             (record.payload.job.meta as Record<string, unknown>).materials,
           )
+        }
+      })
+    })
+
+  database.version(4)
+    .stores({
+      jobs: '&id,date,crew,updatedAt',
+      times: '&id,jobId,start,updatedAt,[jobId+start]',
+      policy: '&key',
+      state: '&key',
+      kudos: '&id,updatedAt',
+      users: '&id,updatedAt',
+      media: '&id,jobId,updatedAt',
+      pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
+    })
+    .upgrade(async (transaction) => {
+      const jobsTable = transaction.table('jobs')
+      await jobsTable.toCollection().modify((record) => {
+        if (!record || typeof record !== 'object') {
+          return
+        }
+        const target = record as Record<string, unknown>
+        const nullableKeys: Array<keyof JobRecord> = [
+          'notes',
+          'address',
+          'neighborhood',
+          'zip',
+        ]
+        for (const key of nullableKeys) {
+          if (!(key in target) || target[key] === undefined) {
+            target[key] = null
+          }
         }
       })
     })

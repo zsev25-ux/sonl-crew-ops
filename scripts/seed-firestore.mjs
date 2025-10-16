@@ -60,6 +60,9 @@ const seedJobs = [
     client: 'Byrd Supply Co.',
     scope: 'Warehouse mezzanine install',
     notes: 'Requires forklift on-site by 8am.',
+    address: null,
+    neighborhood: null,
+    zip: null,
     updatedAt: Date.now(),
   },
   {
@@ -68,6 +71,10 @@ const seedJobs = [
     crew: 'Crew Bravo',
     client: 'City of Ypsilanti',
     scope: 'Holiday lighting run-through',
+    notes: null,
+    address: null,
+    neighborhood: null,
+    zip: null,
     updatedAt: Date.now(),
   },
   {
@@ -77,6 +84,9 @@ const seedJobs = [
     client: 'Fisher Theatre',
     scope: 'Stage rigging refit',
     notes: 'Safety briefing with venue lead before load-in.',
+    address: null,
+    neighborhood: null,
+    zip: null,
     updatedAt: Date.now(),
   },
 ]
