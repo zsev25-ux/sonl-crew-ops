@@ -7,7 +7,9 @@ import {
 import {
   addLocalMedia as addLocalMediaRecord,
   db,
+  generateMediaId,
   setMediaStatus,
+  type MediaRecord,
   type MediaRow,
   type MediaStatus,
 } from '@/lib/db'
@@ -34,7 +36,14 @@ const toJobId = (jobId?: string): string | undefined =>
 
 const mapRecordToMedia = async (record: MediaRow): Promise<JobMedia> => {
   let localUrl = typeof record.localUrl === 'string' ? record.localUrl : undefined
-  if (!localUrl && record.blob instanceof Blob && isBrowser) {
+  if (record.blob instanceof Blob && isBrowser) {
+    if (localUrl) {
+      try {
+        URL.revokeObjectURL(localUrl)
+      } catch (error) {
+        console.warn('Failed to revoke cached media URL', error)
+      }
+    }
     localUrl = URL.createObjectURL(record.blob)
     await db.media.update(record.id, { localUrl })
   }
