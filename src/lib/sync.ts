@@ -12,6 +12,7 @@ import {
   deleteByKey,
   getPendingOpsCount,
   getPendingOpsDue,
+  setMediaStatus,
   updatePendingOp,
   type PendingOpRecord,
   type PendingOpType,
@@ -59,7 +60,7 @@ export type PendingOpPayload =
   | { type: 'job.delete'; jobId: number }
   | { type: 'policy.update'; policy: Policy }
   | { type: 'kudos.react'; kudosId: string; emoji: string; by: string }
-  | { type: 'media.upload'; mediaId: string; jobId: number }
+  | { type: 'media.upload'; mediaId: string }
   | { type: 'custom'; payload: Record<string, unknown> }
 
 const BASE_RETRY_DELAY = 1_000
@@ -519,62 +520,87 @@ const performKudosReact = async (
   )
 }
 
-const performMediaUpload = async (
-  mediaId: string,
-  jobId: number,
-  opId: string,
-) => {
+const processMediaUpload = async (mediaId: string, opId: string) => {
   if (!cloudDb || !cloudStorage) {
     throw new Error('Cloud storage unavailable')
   }
+
   const media = await db.media.get(mediaId)
   if (!media) {
+    await setMediaStatus(mediaId, 'error', { error: 'Local media not found' })
     throw new Error('Local media not found')
   }
-  if (!(media.localBlob instanceof Blob)) {
+
+  if (!(media.blob instanceof Blob)) {
+    await setMediaStatus(mediaId, 'error', { error: 'Local media blob missing' })
     throw new Error('Local media blob missing')
   }
 
-  const path = media.remoteUrl
-    ? media.remoteUrl
-    : `jobs/${jobId}/${opId}-${mediaId}`
-  const ref = storageRef(cloudStorage, path)
-  const uploadTask = uploadBytesResumable(ref, media.localBlob, {
-    contentType: media.mime ?? 'application/octet-stream',
+  await ensureAnonAuth()
+  const jobKey = media.jobId ?? 'general'
+  const storagePath =
+    media.remotePath && typeof media.remotePath === 'string'
+      ? media.remotePath
+      : `media/${jobKey}/${mediaId}-${media.name}`
+  const ref = storageRef(cloudStorage, storagePath)
+
+  await setMediaStatus(mediaId, 'uploading', { error: null })
+
+  const uploadTask = uploadBytesResumable(ref, media.blob, {
+    contentType: media.type || 'application/octet-stream',
   })
 
   await new Promise<void>((resolve, reject) => {
     uploadTask.on(
       'state_changed',
       undefined,
-      (error) => reject(error),
+      async (error) => {
+        await setMediaStatus(mediaId, 'error', { error: error.message })
+        reject(error)
+      },
       () => resolve(),
     )
   })
 
   const remoteUrl = await getDownloadURL(uploadTask.snapshot.ref)
-  await setDoc(
-    doc(cloudDb, 'jobs', String(jobId), 'media', mediaId),
-    {
-      id: mediaId,
-      jobId,
-      kind: media.kind,
-      mime: media.mime,
-      remoteUrl,
-      path,
-      width: media.width,
-      height: media.height,
-      name: mediaId,
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
-  await db.media.update(mediaId, {
+  await setMediaStatus(mediaId, 'uploading', {
     remoteUrl,
-    localBlob: undefined,
-    localUrl: undefined,
-    updatedAt: Date.now(),
+    remotePath: storagePath,
+    error: null,
+  })
+
+  if (media.jobId) {
+    try {
+      await setDoc(
+        doc(cloudDb, 'jobs', String(media.jobId), 'media', mediaId),
+        {
+          id: mediaId,
+          jobId: media.jobId,
+          name: media.name,
+          type: media.type,
+          size: media.size,
+          url: remoteUrl,
+          createdAt: serverTimestamp(),
+          lastOpId: opId,
+        },
+        { merge: true },
+      )
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to persist media metadata'
+      await setMediaStatus(mediaId, 'error', {
+        remoteUrl,
+        remotePath: storagePath,
+        error: message,
+      })
+      throw error
+    }
+  }
+
+  await setMediaStatus(mediaId, 'synced', {
+    remoteUrl,
+    remotePath: storagePath,
+    error: null,
   })
 }
 
@@ -614,9 +640,9 @@ const runOperation = async (op: PendingOpRecord): Promise<void> => {
       break
     }
     case 'media.upload': {
-      const payload = op.payload as { mediaId?: string; jobId?: number }
-      if (payload?.mediaId && typeof payload.jobId === 'number') {
-        await performMediaUpload(payload.mediaId, payload.jobId, op.id)
+      const payload = op.payload as { mediaId?: string }
+      if (typeof payload?.mediaId === 'string' && payload.mediaId) {
+        await processMediaUpload(payload.mediaId, op.id)
       }
       break
     }
@@ -718,7 +744,7 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
       payload = { kudosId: op.kudosId, emoji: op.emoji, by: op.by }
       break
     case 'media.upload':
-      payload = { mediaId: op.mediaId, jobId: op.jobId }
+      payload = { mediaId: op.mediaId }
       break
     case 'custom':
       payload = op.payload
