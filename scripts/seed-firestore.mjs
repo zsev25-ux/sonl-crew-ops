@@ -81,6 +81,37 @@ const seedJobs = [
   },
 ]
 
+const sanitize = (value) => {
+  if (value === undefined) {
+    return undefined
+  }
+  if (value === null) {
+    return null
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => sanitize(entry))
+      .filter((entry) => entry !== undefined)
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+  if (typeof value === 'string') {
+    return value.trim()
+  }
+  if (typeof value === 'object') {
+    const next = {}
+    for (const [key, raw] of Object.entries(value)) {
+      const sanitized = sanitize(raw)
+      if (sanitized !== undefined) {
+        next[key] = sanitized
+      }
+    }
+    return next
+  }
+  return value
+}
+
 async function main() {
   console.info('Seed starting…')
   const app = initializeApp(firebaseConfig)
@@ -88,10 +119,7 @@ async function main() {
 
   await setDoc(
     doc(firestore, 'config', 'policy'),
-    {
-      ...seedPolicy,
-      updatedAt: serverTimestamp(),
-    },
+    { ...sanitize(seedPolicy), updatedAt: serverTimestamp() },
     { merge: true },
   )
   console.info('Policy seeded.')
@@ -99,10 +127,7 @@ async function main() {
   for (const job of seedJobs) {
     await setDoc(
       doc(firestore, 'jobs', String(job.id)),
-      {
-        ...job,
-        updatedAt: serverTimestamp(),
-      },
+      { ...sanitize(job), updatedAt: serverTimestamp() },
       { merge: true },
     )
     console.info(`Job ${job.id} seeded.`)

@@ -10,6 +10,7 @@ import {
 } from '@/lib/db'
 import type { Job, Policy, User } from '@/lib/types'
 import { load } from '@/lib/storage'
+import { normalizeJob } from '@/lib/job-schema'
 
 const LEGACY_STORAGE_KEYS = {
   jobs: 'sonl.jobs.v1',
@@ -38,40 +39,45 @@ export type BootstrapResult = {
   dexieAvailable: boolean
 }
 
-const toJobRecord = (job: Job, updatedAt?: number): JobRecord => ({
-  id: job.id,
-  date: job.date,
-  crew: job.crew,
-  client: job.client,
-  scope: job.scope,
-  notes: job.notes,
-  address: job.address,
-  neighborhood: job.neighborhood,
-  zip: job.zip,
-  houseTier: job.houseTier,
-  rehangPrice: job.rehangPrice,
-  lifetimeSpend: job.lifetimeSpend,
-  vip: job.vip,
-  bothCrews: job.crew === 'Both Crews',
-  updatedAt: updatedAt ?? Date.now(),
-})
+const toJobRecord = (job: Job, updatedAt?: number): JobRecord => {
+  const normalized = normalizeJob(job)
+  return {
+    id: normalized.id,
+    date: normalized.date,
+    crew: normalized.crew,
+    client: normalized.client,
+    scope: normalized.scope,
+    notes: normalized.notes,
+    address: normalized.address,
+    neighborhood: normalized.neighborhood,
+    zip: normalized.zip,
+    houseTier: normalized.houseTier,
+    rehangPrice: normalized.rehangPrice,
+    lifetimeSpend: normalized.lifetimeSpend,
+    vip: normalized.vip,
+    bothCrews: normalized.bothCrews,
+    updatedAt: updatedAt ?? normalized.updatedAt ?? Date.now(),
+  }
+}
 
-const fromJobRecord = (record: JobRecord): Job => ({
-  id: record.id,
-  date: record.date,
-  crew: record.crew,
-  client: record.client,
-  scope: record.scope,
-  notes: record.notes,
-  address: record.address,
-  neighborhood: record.neighborhood,
-  zip: record.zip,
-  houseTier: record.houseTier,
-  rehangPrice: record.rehangPrice,
-  lifetimeSpend: record.lifetimeSpend,
-  vip: record.vip,
-  meta: undefined,
-})
+const fromJobRecord = (record: JobRecord): Job =>
+  normalizeJob({
+    id: record.id,
+    date: record.date,
+    crew: record.crew,
+    client: record.client,
+    scope: record.scope,
+    notes: record.notes,
+    address: record.address,
+    neighborhood: record.neighborhood,
+    zip: record.zip,
+    houseTier: record.houseTier,
+    rehangPrice: record.rehangPrice,
+    lifetimeSpend: record.lifetimeSpend,
+    vip: record.vip,
+    bothCrews: record.bothCrews,
+    updatedAt: record.updatedAt,
+  })
 
 const readLegacySnapshot = (fallback: AppDataSnapshot): AppDataSnapshot => {
   const jobs = load<Job[]>(LEGACY_STORAGE_KEYS.jobs, fallback.jobs)

@@ -1,5 +1,7 @@
 import Dexie, { type Table } from 'dexie'
 import { normalizeMaterials, type JobMaterials } from '@/lib/jobmeta'
+import { normalizeJob, parseJob } from '@/lib/job-schema'
+import { safeSerialize, type SanitizeReport } from '@/lib/sanitize'
 
 export type JobRecord = {
   id: number
@@ -375,4 +377,109 @@ export async function updatePendingOp(
   changes: Partial<PendingOpRecord>,
 ): Promise<void> {
   await db.pendingOps.update(id, { ...changes, updatedAt: Date.now() })
+}
+
+export async function cleanupData(): Promise<{ jobs: number; pendingOps: number }> {
+  let jobsFixed = 0
+  let pendingFixed = 0
+
+  await db.transaction('rw', db.jobs, db.pendingOps, async () => {
+    const jobRecords = await db.jobs.toArray()
+    const jobFields: (keyof JobRecord)[] = [
+      'id',
+      'date',
+      'crew',
+      'client',
+      'scope',
+      'notes',
+      'address',
+      'neighborhood',
+      'zip',
+      'houseTier',
+      'rehangPrice',
+      'lifetimeSpend',
+      'vip',
+      'bothCrews',
+      'updatedAt',
+    ]
+
+    for (const record of jobRecords) {
+      const normalized = normalizeJob({
+        id: record.id,
+        date: record.date,
+        crew: record.crew,
+        client: record.client,
+        scope: record.scope,
+        notes: record.notes,
+        address: record.address,
+        neighborhood: record.neighborhood,
+        zip: record.zip,
+        houseTier: record.houseTier,
+        rehangPrice: record.rehangPrice,
+        lifetimeSpend: record.lifetimeSpend,
+        vip: record.vip,
+        bothCrews: record.bothCrews,
+        updatedAt: record.updatedAt,
+      })
+
+      const cleaned: JobRecord = {
+        id: normalized.id,
+        date: normalized.date,
+        crew: normalized.crew,
+        client: normalized.client,
+        scope: normalized.scope,
+        notes: normalized.notes,
+        address: normalized.address,
+        neighborhood: normalized.neighborhood,
+        zip: normalized.zip,
+        houseTier: normalized.houseTier,
+        rehangPrice: normalized.rehangPrice,
+        lifetimeSpend: normalized.lifetimeSpend,
+        vip: normalized.vip,
+        bothCrews: normalized.bothCrews,
+        updatedAt: normalized.updatedAt ?? record.updatedAt,
+      }
+
+      const changed = jobFields.some((field) => record[field] !== cleaned[field])
+      if (changed) {
+        await db.jobs.put(cleaned)
+        jobsFixed += 1
+      }
+    }
+
+    const opRecords = await db.pendingOps.toArray()
+    for (const record of opRecords) {
+      const payload = record.payload
+      if (!payload || typeof payload !== 'object') {
+        continue
+      }
+      if ('job' in (payload as Record<string, unknown>)) {
+        const rawJob = (payload as { job?: unknown }).job
+        if (!rawJob || typeof rawJob !== 'object') {
+          continue
+        }
+        try {
+          const { job: normalized } = parseJob(rawJob)
+          const report: SanitizeReport = { removed: [], changes: [] }
+          const sanitized = safeSerialize(normalized, { report })
+          const originalJson = JSON.stringify(rawJob)
+          const sanitizedJson = JSON.stringify(sanitized)
+          if (originalJson !== sanitizedJson) {
+            await db.pendingOps.update(record.id, {
+              payload: { ...(payload as Record<string, unknown>), job: sanitized },
+            })
+            pendingFixed += 1
+          }
+        } catch (error) {
+          console.warn('[cleanup] unable to normalize pending op', record.id, error)
+        }
+      }
+    }
+  })
+
+  if (jobsFixed > 0 || pendingFixed > 0) {
+    console.info('[cleanup] sanitized records', { jobsFixed, pendingFixed })
+  }
+
+  return { jobs: jobsFixed, pendingOps: pendingFixed }
 }

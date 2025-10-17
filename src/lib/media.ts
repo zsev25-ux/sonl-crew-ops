@@ -21,6 +21,7 @@ import {
   ref as storageRef,
   uploadBytes,
 } from 'firebase/storage'
+import { safeSerialize, type SanitizeReport } from '@/lib/sanitize'
 
 export type JobMedia = {
   id: string
@@ -288,9 +289,15 @@ const uploadImageToFirebase = async (params: {
     thumbPath,
   }
 
+  const report: SanitizeReport = { removed: [], changes: [] }
+  const cleanDoc = safeSerialize(mediaDoc, { report })
+  if (report.removed.length > 0) {
+    console.warn('[sanitize][media:image]', id, report)
+  }
+
   await setDoc(
     doc(collection(dbInstance, 'jobs', params.jobId, 'media'), id),
-    mediaDoc,
+    cleanDoc,
   )
 
   return {
@@ -360,9 +367,15 @@ const uploadVideoToFirebase = async (params: {
     path: videoPath,
   }
 
+  const report: SanitizeReport = { removed: [], changes: [] }
+  const cleanDoc = safeSerialize(mediaDoc, { report })
+  if (report.removed.length > 0) {
+    console.warn('[sanitize][media:video]', id, report)
+  }
+
   await setDoc(
     doc(collection(dbInstance, 'jobs', params.jobId, 'media'), id),
-    mediaDoc,
+    cleanDoc,
   )
 
   return {

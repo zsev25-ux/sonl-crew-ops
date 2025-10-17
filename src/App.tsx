@@ -68,7 +68,9 @@ import {
   persistUser,
   type BootstrapSource,
 } from '@/lib/app-data'
-import { db } from '@/lib/db'
+import { db, cleanupData } from '@/lib/db'
+import { normalizeJob, parseJob } from '@/lib/job-schema'
+import { pushToast, registerToastListener, type ToastPayload } from '@/lib/notifications'
 import type { CrewOption, Job, JobCore, Policy, Role, User } from '@/lib/types'
 
 const LOGIN_BG = '/FINEASFLOADINGSCREEN.jpg' // place the file in /public
@@ -600,49 +602,16 @@ const sanitizeJobs = (value: unknown, fallback: Job[]): Job[] => {
     if (!raw || typeof raw !== 'object') {
       return
     }
-    const record = raw as Partial<Job>
-    const date = typeof record.date === 'string' ? record.date : ''
-    const crew = typeof record.crew === 'string' ? record.crew : ''
-    const client = typeof record.client === 'string' ? record.client : ''
-    const scope = typeof record.scope === 'string' ? record.scope : ''
-    if (!date || !crew || !client || !scope) {
-      return
+    const candidate = { ...(raw as Record<string, unknown>) }
+    if (!('id' in candidate)) {
+      candidate.id = Date.now() + index
     }
-
-    sanitized.push({
-      id:
-        typeof record.id === 'number' && Number.isFinite(record.id)
-          ? record.id
-          : Date.now() + index,
-      date,
-      crew,
-      client,
-      scope,
-      notes:
-        typeof record.notes === 'string' ? record.notes : undefined,
-      address:
-        typeof record.address === 'string' ? record.address : undefined,
-      neighborhood:
-        typeof record.neighborhood === 'string'
-          ? record.neighborhood
-          : undefined,
-      zip: typeof record.zip === 'string' ? record.zip : undefined,
-      houseTier:
-        typeof record.houseTier === 'number' && Number.isFinite(record.houseTier)
-          ? record.houseTier
-          : undefined,
-      rehangPrice:
-        typeof record.rehangPrice === 'number' &&
-        Number.isFinite(record.rehangPrice)
-          ? record.rehangPrice
-          : undefined,
-      lifetimeSpend:
-        typeof record.lifetimeSpend === 'number' &&
-        Number.isFinite(record.lifetimeSpend)
-          ? record.lifetimeSpend
-          : undefined,
-      vip: Boolean(record.vip),
-    })
+    try {
+      const { job } = parseJob(candidate)
+      sanitized.push(job)
+    } catch (error) {
+      console.warn('[app] dropping invalid job during sanitization', candidate, error)
+    }
   })
 
   if (sanitized.length === 0) {
@@ -784,6 +753,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [storageError, setStorageError] = useState<string | null>(null)
   const syncStatus = useSyncStatus()
   const syncEnabled = cloudEnabled && Boolean(cloudDb)
+  const [toast, setToast] = useState<ToastPayload | null>(null)
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null)
   const [installDismissed, setInstallDismissed] = useState<boolean>(() => {
     if (typeof window === 'undefined') {
@@ -812,6 +782,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const suppressJobsQueueRef = useRef(false)
   const previousPolicyRef = useRef<Policy>(sanitizedDefaultPolicy)
   const suppressPolicyQueueRef = useRef(false)
+  const toastTimeoutRef = useRef<number | null>(null)
 
   const [scheduleForm, setScheduleForm] = useState<JobFormState>(() =>
     createEmptyForm({ date: activeDate }),
@@ -946,7 +917,33 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     setBoardTab('clients')
   }, [user.name])
 
+  useEffect(() => registerToastListener((payload) => setToast(payload)), [])
+
+  useEffect(() => {
+    if (toastTimeoutRef.current !== null) {
+      window.clearTimeout(toastTimeoutRef.current)
+      toastTimeoutRef.current = null
+    }
+    if (toast) {
+      toastTimeoutRef.current = window.setTimeout(() => {
+        setToast(null)
+        toastTimeoutRef.current = null
+      }, 5000)
+    }
+
+    return () => {
+      if (toastTimeoutRef.current !== null) {
+        window.clearTimeout(toastTimeoutRef.current)
+        toastTimeoutRef.current = null
+      }
+    }
+  }, [toast])
+
   const lastSyncLabel = useMemo(() => formatRelativeTimestamp(syncStatus.lastSyncedAt), [syncStatus.lastSyncedAt])
+  const lastSanitizedLabel = useMemo(
+    () => formatRelativeTimestamp(syncStatus.lastSanitizedAt),
+    [syncStatus.lastSanitizedAt],
+  )
   const showInstallCta = !appInstalled && Boolean(installPromptEvent) && !installDismissed
   const showInstallHint = !appInstalled && !installPromptEvent && !installDismissed
 
@@ -1135,7 +1132,12 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     if (ops.length > 0) {
       void (async () => {
         for (const op of ops) {
-          await enqueueSyncOp(op)
+          try {
+            await enqueueSyncOp(op)
+          } catch (error) {
+            console.error('Failed to enqueue sync operation', op, error)
+            break
+          }
         }
       })()
     }
@@ -1993,15 +1995,15 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
 
   const addJobToBoard = async (payload: JobCore): Promise<Job> => {
     const jobId = Date.now() + Math.floor(Math.random() * 1000)
-    const job: Job = { id: jobId, ...payload }
+    const normalizedJob = normalizeJob({ id: jobId, ...payload })
     setJobs((prev) =>
       sortJobs([
         ...prev.filter((existing) => existing.id !== jobId),
-        job,
+        normalizedJob,
       ]),
     )
     setActiveDate(payload.date)
-    return job
+    return normalizedJob
   }
 
   const handleScheduleSubmit = async (
@@ -2053,6 +2055,21 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     },
     [],
   )
+
+  const handleRunCleanup = useCallback(async () => {
+    try {
+      const result = await cleanupData()
+      pushToast(
+        `Cleanup complete: sanitized ${result.jobs} jobs and ${result.pendingOps} pending ops.`,
+        'info',
+      )
+      return result
+    } catch (error) {
+      console.error('Cleanup failed', error)
+      pushToast('Cleanup failed. Check console for details.', 'error')
+      throw error
+    }
+  }, [])
 
   const handleQuickAddMaterialBlur = useCallback(
     (key: MaterialKey) => () => {
@@ -2383,6 +2400,11 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
                       {syncStatus.lastError ? ' · error' : ''}
                     </p>
                     <p className="text-[11px] text-slate-300/80">Last sync: {lastSyncLabel}</p>
+                    {syncStatus.lastSanitizedAt && (
+                      <p className="text-[11px] text-slate-400/80">
+                        Last sanitized: {lastSanitizedLabel}
+                      </p>
+                    )}
                     {syncStatus.lastError && (
                       <p className="text-[11px] text-rose-300">Sync issue: {syncStatus.lastError}</p>
                     )}
@@ -3363,6 +3385,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
           onLogout={onLogout}
           syncStatus={syncStatus}
           onSyncNow={syncNow}
+          onRunCleanup={handleRunCleanup}
         />
       )}
             </div>
@@ -3375,6 +3398,35 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
           hasCrewBadge={hasFreshKudos}
         />
       </div>
+      {typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          <div className="pointer-events-none fixed inset-0 z-[60] flex flex-col items-center pt-6">
+            <AnimatePresence>
+              {toast && (
+                <motion.div
+                  key={toast.id}
+                  initial={{ y: -20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  exit={{ y: -20, opacity: 0 }}
+                  className="w-full max-w-md px-4"
+                >
+                  <div
+                    className={`pointer-events-auto rounded-2xl border px-4 py-3 text-sm shadow-lg shadow-black/40 transition ${
+                      toast.tone === 'error'
+                        ? 'border-rose-400/60 bg-rose-500/90 text-white'
+                        : toast.tone === 'warning'
+                          ? 'border-amber-400/60 bg-amber-400 text-slate-900'
+                          : 'border-emerald-300/60 bg-emerald-400 text-slate-900'
+                    }`}
+                  >
+                    {toast.message}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>,
+          document.getElementById('layer-toast') ?? document.body,
+        )}
       <AnimatePresence>
         {currentLightboxItem && (
           <motion.div
@@ -4174,11 +4226,13 @@ function ProfileScreen({
   onLogout,
   syncStatus,
   onSyncNow,
+  onRunCleanup,
 }: {
   user: User
   onLogout: () => void
   syncStatus: SyncState
   onSyncNow: () => void
+  onRunCleanup: () => Promise<{ jobs: number; pendingOps: number }>
 }) {
   const initialAchievements = useMemo<Record<AchievementKey, string | null>>(
     () => ({
@@ -4194,6 +4248,24 @@ function ProfileScreen({
   )
   const [unlockedBadge, setUnlockedBadge] = useState<AchievementKey | null>(null)
   const lastSyncLabel = useMemo(() => formatRelativeTimestamp(syncStatus.lastSyncedAt), [syncStatus.lastSyncedAt])
+  const lastSanitizedLabel = useMemo(
+    () => formatRelativeTimestamp(syncStatus.lastSanitizedAt),
+    [syncStatus.lastSanitizedAt],
+  )
+  const [cleanupResult, setCleanupResult] = useState<{ jobs: number; pendingOps: number } | null>(null)
+  const [cleanupRunning, setCleanupRunning] = useState(false)
+
+  const handleRunCleanup = useCallback(async () => {
+    setCleanupRunning(true)
+    try {
+      const result = await onRunCleanup()
+      setCleanupResult(result)
+    } catch (error) {
+      console.warn('Cleanup action failed', error)
+    } finally {
+      setCleanupRunning(false)
+    }
+  }, [onRunCleanup])
 
   const badgeMeta: Record<
     AchievementKey,
@@ -4329,9 +4401,15 @@ function ProfileScreen({
             Sync {syncStatus.status}
             {syncStatus.queued > 0 ? ` · ${syncStatus.queued} queued` : ''}
             {` · Last sync ${lastSyncLabel}`}
+            {syncStatus.lastSanitizedAt ? ` · Sanitized ${lastSanitizedLabel}` : ''}
           </p>
           {syncStatus.lastError && (
             <p className="text-xs text-rose-300">Last error: {syncStatus.lastError}</p>
+          )}
+          {cleanupResult && (
+            <p className="text-xs text-emerald-300">
+              Last cleanup sanitized {cleanupResult.jobs} jobs · {cleanupResult.pendingOps} ops
+            </p>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -4342,6 +4420,15 @@ function ProfileScreen({
           >
             Sync now
           </Button>
+          {user.role === 'admin' && (
+            <Button
+              onClick={handleRunCleanup}
+              disabled={cleanupRunning}
+              className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/60 px-5 py-2 text-sm font-semibold text-slate-200 transition hover:border-amber-400/60 hover:text-amber-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 disabled:opacity-60"
+            >
+              {cleanupRunning ? 'Cleaning…' : 'Run data cleanup'}
+            </Button>
+          )}
           <Button
             onClick={onLogout}
             className="inline-flex items-center gap-2 rounded-full bg-amber-500 px-5 py-2 text-sm font-semibold text-slate-900 transition hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
