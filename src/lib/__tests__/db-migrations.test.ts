@@ -50,4 +50,43 @@ describe('Dexie migrations', () => {
 
     await upgraded.close()
   })
+
+  it('converts legacy media blobs to the new structure', async () => {
+    const legacy = new Dexie(dbName)
+    legacy.version(3).stores({
+      jobs: '&id,date,crew,updatedAt',
+      times: '&id,jobId,start,updatedAt,[jobId+start]',
+      policy: '&key',
+      state: '&key',
+      kudos: '&id,updatedAt',
+      users: '&id,updatedAt',
+      media: '&id,jobId,updatedAt',
+      pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
+    })
+    await legacy.open()
+
+    const blob = new Blob(['legacy'], { type: 'image/png' })
+    await legacy.table('media').put({
+      id: 'media-1',
+      jobId: 42,
+      kind: 'image',
+      mime: 'image/png',
+      localBlob: blob,
+      updatedAt: 1700000000000,
+    })
+    await legacy.close()
+
+    const upgraded = createDatabase(dbName)
+    await upgraded.open()
+
+    const record = await upgraded.media.get('media-1')
+    expect(record).toBeTruthy()
+    expect(record?.type).toBe('image/png')
+    expect(record?.blob).toBeInstanceOf(Blob)
+    expect(record?.size).toBe(blob.size)
+    expect(record?.status).toBe('pending')
+    expect(record?.kind).toBe('image')
+
+    await upgraded.close()
+  })
 })

@@ -531,26 +531,56 @@ const performMediaUpload = async (
   if (!media) {
     throw new Error('Local media not found')
   }
-  if (!(media.localBlob instanceof Blob)) {
+  if (!(media.blob instanceof Blob)) {
     throw new Error('Local media blob missing')
   }
 
-  const path = media.remoteUrl
-    ? media.remoteUrl
-    : `jobs/${jobId}/${opId}-${mediaId}`
-  const ref = storageRef(cloudStorage, path)
-  const uploadTask = uploadBytesResumable(ref, media.localBlob, {
-    contentType: media.mime ?? 'application/octet-stream',
+  const extensionFromName = (): string => {
+    if (media.name && media.name.includes('.')) {
+      const ext = media.name.split('.').pop()?.trim()
+      if (ext) {
+        return ext.toLowerCase()
+      }
+    }
+    const typeExt = media.type?.split('/')[1]
+    return typeExt ? typeExt.toLowerCase() : ''
+  }
+
+  const ensurePath = (): string => {
+    if (media.storagePath && media.storagePath.length > 0) {
+      return media.storagePath
+    }
+    const ext = extensionFromName()
+    const sanitizedExt = ext ? `.${ext.replace(/[^a-z0-9]/gi, '')}` : ''
+    return `media/${jobId}/${opId}-${mediaId}${sanitizedExt}`
+  }
+
+  const storagePath = ensurePath()
+
+  await db.media.update(mediaId, {
+    status: 'syncing',
+    storagePath,
+    updatedAt: Date.now(),
   })
 
-  await new Promise<void>((resolve, reject) => {
-    uploadTask.on(
-      'state_changed',
-      undefined,
-      (error) => reject(error),
-      () => resolve(),
-    )
+  const ref = storageRef(cloudStorage, storagePath)
+  const uploadTask = uploadBytesResumable(ref, media.blob, {
+    contentType: media.type ?? 'application/octet-stream',
   })
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      uploadTask.on(
+        'state_changed',
+        undefined,
+        (error) => reject(error),
+        () => resolve(),
+      )
+    })
+  } catch (error) {
+    await db.media.update(mediaId, { status: 'error', updatedAt: Date.now() })
+    throw error
+  }
 
   const remoteUrl = await getDownloadURL(uploadTask.snapshot.ref)
   await setDoc(
@@ -559,12 +589,15 @@ const performMediaUpload = async (
       id: mediaId,
       jobId,
       kind: media.kind,
-      mime: media.mime,
-      remoteUrl,
-      path,
+      mime: media.type ?? 'application/octet-stream',
+      url: remoteUrl,
+      path: storagePath,
       width: media.width,
       height: media.height,
-      name: mediaId,
+      name: media.name ?? mediaId,
+      size: media.size,
+      createdAt: media.createdAt,
+      status: 'synced',
       updatedAt: serverTimestamp(),
       lastOpId: opId,
     },
@@ -572,8 +605,8 @@ const performMediaUpload = async (
   )
   await db.media.update(mediaId, {
     remoteUrl,
-    localBlob: undefined,
-    localUrl: undefined,
+    status: 'synced',
+    storagePath,
     updatedAt: Date.now(),
   })
 }

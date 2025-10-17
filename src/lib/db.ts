@@ -60,17 +60,23 @@ export type UserRecord = {
   updatedAt: number
 }
 
+export type MediaStatus = 'pending' | 'syncing' | 'synced' | 'error'
+
 export type MediaRecord = {
   id: string
   jobId: number
-  kind: 'image' | 'video'
-  mime?: string
-  localBlob?: Blob
+  kind: 'image' | 'video' | 'file'
+  type: string
+  size: number
+  blob?: Blob
   localUrl?: string
   remoteUrl?: string
   thumbUrl?: string
+  storagePath?: string
+  status: MediaStatus
   width?: number
   height?: number
+  name?: string
   createdAt: number
   updatedAt: number
 }
@@ -116,6 +122,22 @@ type TableValue =
   | PendingOpRecord
 
 type UpdatableRecord = Exclude<TableValue, PendingOpRecord>
+
+type LegacyMediaRecord = Record<string, unknown> & {
+  id?: string
+  jobId?: number | string
+  kind?: string
+  mime?: string
+  type?: string
+  localBlob?: Blob
+  blob?: Blob
+  size?: number
+  remoteUrl?: string
+  status?: string
+  createdAt?: number
+  updatedAt?: number
+  name?: string
+}
 
 export class SonlCrewOpsDexie extends Dexie {
   jobs!: Table<JobRecord, number>
@@ -260,6 +282,81 @@ const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
           (record.payload.job.meta as Record<string, unknown>).materials = normalizeMaterials(
             (record.payload.job.meta as Record<string, unknown>).materials,
           )
+        }
+      })
+    })
+
+  database.version(4)
+    .stores({
+      jobs: '&id,date,crew,updatedAt',
+      times: '&id,jobId,start,updatedAt,[jobId+start]',
+      policy: '&key',
+      state: '&key',
+      kudos: '&id,updatedAt',
+      users: '&id,updatedAt',
+      media: '&id,jobId,status,createdAt,updatedAt',
+      pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
+    })
+    .upgrade(async (transaction) => {
+      const mediaTable = transaction.table('media')
+      const now = Date.now()
+      await mediaTable.toCollection().modify((raw) => {
+        const record = raw as LegacyMediaRecord
+        const typeValue =
+          record.type && typeof record.type === 'string' && record.type.length > 0
+            ? record.type
+            : record.mime && typeof record.mime === 'string' && record.mime.length > 0
+              ? record.mime
+              : 'application/octet-stream'
+        record.type = typeValue
+        if (record.mime) {
+          delete record.mime
+        }
+
+        const localBlob =
+          record.blob instanceof Blob
+            ? record.blob
+            : record.localBlob instanceof Blob
+              ? record.localBlob
+              : undefined
+
+        if (localBlob) {
+          record.blob = localBlob
+          record.size = typeof record.size === 'number' ? record.size : localBlob.size
+        } else if (typeof record.size !== 'number' || !Number.isFinite(record.size)) {
+          record.size = 0
+        }
+
+        if (record.localBlob) {
+          delete record.localBlob
+        }
+
+        const inferredKind = typeValue.startsWith('video/')
+          ? 'video'
+          : typeValue.startsWith('image/')
+            ? 'image'
+            : 'file'
+        if (record.kind !== 'image' && record.kind !== 'video' && record.kind !== 'file') {
+          record.kind = inferredKind
+        }
+
+        if (typeof record.status !== 'string') {
+          record.status =
+            record.remoteUrl && typeof record.remoteUrl === 'string' && record.remoteUrl.length > 0
+              ? 'synced'
+              : 'pending'
+        }
+
+        if (typeof record.createdAt !== 'number' || !Number.isFinite(record.createdAt)) {
+          record.createdAt = now
+        }
+
+        if (typeof record.updatedAt !== 'number' || !Number.isFinite(record.updatedAt)) {
+          record.updatedAt = now
+        }
+
+        if (typeof record.name !== 'string' || record.name.length === 0) {
+          record.name = record.id ?? 'media'
         }
       })
     })
