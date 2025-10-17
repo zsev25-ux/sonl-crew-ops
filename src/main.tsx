@@ -3,14 +3,17 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App'
 
-try {
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
-  import('virtual:pwa-register').then(({ registerSW }) =>
+void import('virtual:pwa-register')
+  .then(({ registerSW }) =>
     registerSW?.({
-      onOfflineReady() {},
+      onOfflineReady: () => {
+        /* noop */
+      },
     }),
   )
-} catch {}
+  .catch((error) => {
+    console.warn('PWA registration unavailable', error)
+  })
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

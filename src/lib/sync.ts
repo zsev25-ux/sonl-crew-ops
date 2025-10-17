@@ -14,7 +14,6 @@ import {
   getPendingOpsDue,
   updatePendingOp,
   type PendingOpRecord,
-  type PendingOpType,
 } from '@/lib/db'
 import type { Job, Policy } from '@/lib/types'
 import { normalizeJobMeta } from '@/lib/jobmeta'

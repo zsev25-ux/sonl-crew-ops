@@ -1,7 +1,6 @@
 import React, {
   type ChangeEvent,
   type FormEvent,
-  type RefObject,
   useCallback,
   useEffect,
   useMemo,
@@ -37,7 +36,7 @@ import {
   saveMeta,
   type JobMeta,
 } from '@/lib/jobmeta'
-import { cloudEnabled, ensureAnonAuth, db as cloudDb } from '@/lib/firebase'
+import { cloudEnabled, db as cloudDb } from '@/lib/firebase'
 import {
   enqueueSyncOp,
   subscribeFirestore,
@@ -223,6 +222,20 @@ const SAMPLE_KUDOS: KudosEntry[] = [
   },
 ]
 
+const INITIAL_HAS_FRESH_KUDOS = SAMPLE_KUDOS.some((entry) => {
+  const timestamp = new Date(entry.timestamp).getTime()
+  if (Number.isNaN(timestamp)) {
+    return false
+  }
+  return Date.now() - timestamp < 1000 * 60 * 60 * 24 * 3
+})
+
+const INITIAL_ACHIEVEMENTS: Record<AchievementKey, string | null> = {
+  five_streak: null,
+  route_master: new Date('2025-11-10T09:15:00Z').toISOString(),
+  client_favorite: null,
+}
+
 const crewOptions: CrewOption[] = ['Crew Alpha', 'Crew Bravo', 'Both Crews']
 
 type JobFormState = {
@@ -241,14 +254,6 @@ type JobFormState = {
   materials: MaterialsInputState
 }
 
-const getPlannedHoursForJob = (job: Job): number => {
-  if (typeof job.houseTier === 'number') {
-    return TIER_HOURS[job.houseTier] ?? DEFAULT_JOB_HOURS
-  }
-
-  return DEFAULT_JOB_HOURS
-}
-
 const CREW_PINS = {
   Admin: '0000',
   'Crew Alpha': '1111',
@@ -256,6 +261,9 @@ const CREW_PINS = {
   Dispatcher: '3333',
   'Crew Support': '4444',
 } as const
+
+const CREW_NAMES = Object.keys(CREW_PINS)
+const DEFAULT_LOGIN_CREW = CREW_NAMES[0] ?? 'Luke'
 
 const ROLE_BY_CREW: Record<keyof typeof CREW_PINS, Role> = {
   Admin: 'admin',
@@ -267,9 +275,6 @@ const ROLE_BY_CREW: Record<keyof typeof CREW_PINS, Role> = {
 
 const getRoleForCrew = (name: string): Role =>
   ROLE_BY_CREW[name as keyof typeof CREW_PINS] ?? 'crew'
-
-const isRole = (value: unknown): value is Role =>
-  value === 'admin' || value === 'crew' || value === 'dispatcher' || value === 'support'
 
 const isPinValid = (name: string, pin: string): boolean => {
   const normalizedPin = pin.trim()
@@ -318,16 +323,6 @@ const stripesStyles = `
     animation: sonl-stripes 2.2s linear infinite;
   }
 `
-
-const HOURS_PER_DAY_LIMIT = 8
-const DEFAULT_JOB_HOURS = 2.5
-const TIER_HOURS: Record<number, number> = {
-  1: 2,
-  2: 3,
-  3: 4,
-  4: 5,
-  5: 6,
-}
 
 const roofTypeOptions: Exclude<JobMeta['roofType'], undefined>[] = [
   'single-story',
@@ -429,14 +424,6 @@ const titleCase = (value: string): string =>
     )
     .join(' ')
 
-const formatHours = (hours: number): string => {
-  if (!Number.isFinite(hours)) {
-    return '0'
-  }
-  const rounded = Number(hours.toFixed(1))
-  return Number.isInteger(rounded) ? String(Math.trunc(rounded)) : rounded.toFixed(1)
-}
-
 const formatRelativeTimestamp = (value: number | null): string => {
   if (!value) {
     return 'Never'
@@ -467,12 +454,6 @@ const moneyFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
   minimumFractionDigits: 0,
-})
-
-const dateFormatter = new Intl.DateTimeFormat('en-US', {
-  month: 'long',
-  day: 'numeric',
-  year: 'numeric',
 })
 
 const todayIso = new Date().toISOString().slice(0, 10)
@@ -715,6 +696,12 @@ const triggerDownload = (blob: Blob, filename: string) => {
   URL.revokeObjectURL(url)
 }
 
+const SANITIZED_INITIAL_JOBS = sanitizeJobs(initialJobs, initialJobs)
+const SANITIZED_DEFAULT_POLICY = sanitizePolicy(defaultPolicy, defaultPolicy)
+const DEFAULT_MATERIAL_INPUTS = toMaterialsInputState(
+  createDefaultJobMeta().materials,
+)
+
 function validateNewJob(
   newJob: JobCore,
   existingJobs: Job[],
@@ -765,16 +752,8 @@ function validateNewJob(
 }
 
 function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
-  const sanitizedInitialJobs = useMemo(
-    () => sanitizeJobs(initialJobs, initialJobs),
-    [],
-  )
-  const sanitizedDefaultPolicy = useMemo(
-    () => sanitizePolicy(defaultPolicy, defaultPolicy),
-    [],
-  )
-  const [jobs, setJobs] = useState<Job[]>(sanitizedInitialJobs)
-  const [policy, setPolicy] = useState<Policy>(sanitizedDefaultPolicy)
+  const [jobs, setJobs] = useState<Job[]>(SANITIZED_INITIAL_JOBS)
+  const [policy, setPolicy] = useState<Policy>(SANITIZED_DEFAULT_POLICY)
   const [view, setView] = useState<View>('route')
   const [boardTab, setBoardTab] = useState<BoardTab>('clients')
   const [activeDate, setActiveDate] = useState<string>(initialActiveDate)
@@ -808,9 +787,9 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
       return false
     }
   })
-  const previousJobsRef = useRef<Job[]>(sanitizedInitialJobs)
+  const previousJobsRef = useRef<Job[]>(SANITIZED_INITIAL_JOBS)
   const suppressJobsQueueRef = useRef(false)
-  const previousPolicyRef = useRef<Policy>(sanitizedDefaultPolicy)
+  const previousPolicyRef = useRef<Policy>(SANITIZED_DEFAULT_POLICY)
   const suppressPolicyQueueRef = useRef(false)
 
   const [scheduleForm, setScheduleForm] = useState<JobFormState>(() =>
@@ -835,14 +814,10 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [jobMetaDraft, setJobMetaDraft] = useState<JobMeta>(() =>
     createDefaultJobMeta(),
   )
-  const defaultMaterialInputs = useMemo(
-    () => toMaterialsInputState(createDefaultJobMeta().materials),
-    [],
-  )
   const [materialInputs, setMaterialInputs] = useState<MaterialsInputState>(
-    defaultMaterialInputs,
+    DEFAULT_MATERIAL_INPUTS,
   )
-  const materialInputsRef = useRef<MaterialsInputState>(defaultMaterialInputs)
+  const materialInputsRef = useRef<MaterialsInputState>(DEFAULT_MATERIAL_INPUTS)
   const [metaDirty, setMetaDirty] = useState(false)
   const [metaSaving, setMetaSaving] = useState(false)
   const [metaStatusMessage, setMetaStatusMessage] = useState<string | null>(null)
@@ -858,9 +833,6 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [localMediaItems, setLocalMediaItems] = useState<JobMedia[]>([])
   const [migrationInProgress, setMigrationInProgress] = useState(false)
-
-  const [copyStatus, setCopyStatus] = useState<string | null>(null)
-  const copyStatusTimeoutRef = useRef<number | null>(null)
 
   const quickAddButtonRef = useRef<HTMLButtonElement>(null)
   const quickAddSectionRef = useRef<HTMLDivElement>(null)
@@ -977,8 +949,8 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   useEffect(() => {
     let cancelled = false
     const fallbackSnapshot = {
-      jobs: sanitizedInitialJobs,
-      policy: sanitizedDefaultPolicy,
+      jobs: SANITIZED_INITIAL_JOBS,
+      policy: SANITIZED_DEFAULT_POLICY,
       activeDate: initialActiveDate,
       user: null,
     }
@@ -989,8 +961,8 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         if (cancelled) {
           return
         }
-        const nextJobs = sanitizeJobs(result.snapshot.jobs, sanitizedInitialJobs)
-        const nextPolicy = sanitizePolicy(result.snapshot.policy, sanitizedDefaultPolicy)
+        const nextJobs = sanitizeJobs(result.snapshot.jobs, SANITIZED_INITIAL_JOBS)
+        const nextPolicy = sanitizePolicy(result.snapshot.policy, SANITIZED_DEFAULT_POLICY)
         const nextActiveDate = sanitizeActiveDate(
           result.snapshot.activeDate,
           nextJobs[0]?.date ?? initialActiveDate,
@@ -1019,7 +991,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     return () => {
       cancelled = true
     }
-  }, [initialActiveDate, sanitizedDefaultPolicy, sanitizedInitialJobs])
+  }, [])
 
   useEffect(() => {
     if (!storageReady || !syncEnabled) {
@@ -1211,19 +1183,6 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     })()
   }, [user, storageReady])
 
-  const groupedJobs = useMemo(() => {
-    const byDate = new Map<string, Job[]>()
-    for (const job of jobs) {
-      const list = byDate.get(job.date) ?? []
-      list.push(job)
-      byDate.set(job.date, list)
-    }
-
-    return Array.from(byDate.entries()).sort(([dateA], [dateB]) =>
-      dateA.localeCompare(dateB),
-    )
-  }, [jobs])
-
   const filteredClients = useMemo(() => {
     const term = clientSearch.trim().toLowerCase()
     if (!term) {
@@ -1252,20 +1211,6 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const paginatedClients = filteredClients.slice(
     (currentPage - 1) * pageSize,
     currentPage * pageSize,
-  )
-
-  const getCachedMeta = useCallback(
-    (jobId: number): JobMeta => {
-      const cached = jobMetaCacheRef.current.get(jobId)
-      if (cached) {
-        return cached
-      }
-
-      const meta = loadMeta(String(jobId))
-      jobMetaCacheRef.current.set(jobId, meta)
-      return meta
-    },
-    [],
   )
 
   const persistMetaForJob = useCallback(
@@ -1314,22 +1259,6 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
 
     return jobs.find((job) => job.id === activeJobId) ?? null
   }, [jobs, activeJobId])
-
-  const plannedHoursForActiveDay = useMemo(() => {
-    return activeDayJobs.reduce(
-      (total, job) => total + getPlannedHoursForJob(job),
-      0,
-    )
-  }, [activeDayJobs])
-
-  const plannedHoursPercent = Math.min(
-    100,
-    HOURS_PER_DAY_LIMIT > 0
-      ? (plannedHoursForActiveDay / HOURS_PER_DAY_LIMIT) * 100
-      : 0,
-  )
-
-  const dayOverCapacity = plannedHoursForActiveDay > HOURS_PER_DAY_LIMIT
 
   const needsMigration =
     cloudEnabled &&
@@ -1386,7 +1315,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     setMetaSaving(true)
     persistMetaForJob(activeJob.id, jobMetaDraft)
     setMetaSaving(false)
-  }, [activeJob, cloudEnabled, jobMetaDraft, persistMetaForJob])
+  }, [activeJob, jobMetaDraft, persistMetaForJob])
 
   const handleStatusChange = useCallback(
     (status: Exclude<JobMeta['status'], undefined>) => {
@@ -1692,69 +1621,6 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     }
   }, [activeJob, jobMetaDraft, persistMetaForJob])
 
-  const handleCopyAddress = useCallback(() => {
-    if (!activeJob) {
-      return
-    }
-
-    const parts = [
-      activeJob.address,
-      activeJob.neighborhood,
-      activeJob.zip,
-    ].filter(Boolean)
-    const scheduleMessage = (message: string) => {
-      setCopyStatus(message)
-      if (copyStatusTimeoutRef.current !== null) {
-        window.clearTimeout(copyStatusTimeoutRef.current)
-      }
-      copyStatusTimeoutRef.current = window.setTimeout(() => {
-        setCopyStatus(null)
-        copyStatusTimeoutRef.current = null
-      }, 2000)
-    }
-
-    if (parts.length === 0) {
-      scheduleMessage('No address on file')
-      return
-    }
-
-    const text = parts.join(', ')
-
-    const commitSuccess = () => {
-      scheduleMessage('Address copied')
-    }
-
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      navigator.clipboard
-        .writeText(text)
-        .then(commitSuccess)
-        .catch(() => {
-          scheduleMessage('Copy failed')
-        })
-      return
-    }
-
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    textarea.style.position = 'fixed'
-    textarea.style.opacity = '0'
-    document.body.appendChild(textarea)
-    textarea.select()
-    try {
-      const successful = document.execCommand('copy')
-      if (successful) {
-        commitSuccess()
-      } else {
-        scheduleMessage('Copy failed')
-      }
-    } catch (error) {
-      console.error('Copy failed', error)
-      scheduleMessage('Copy failed')
-    } finally {
-      document.body.removeChild(textarea)
-    }
-  }, [activeJob])
-
   useEffect(() => {
     if (crewNotesAutoSaveTimeoutRef.current !== null) {
       window.clearTimeout(crewNotesAutoSaveTimeoutRef.current)
@@ -1925,7 +1791,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         crewNotesAutoSaveTimeoutRef.current = null
       }
     }
-  }, [activeJob, jobMetaDraft.crewNotes, persistMetaForJob])
+  }, [activeJob, jobMetaDraft, persistMetaForJob])
 
   useEffect(() => {
     return () => {
@@ -1937,14 +1803,6 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
       }
     }
   }, [mediaItems, localMediaItems])
-
-  useEffect(() => {
-    return () => {
-      if (copyStatusTimeoutRef.current !== null) {
-        window.clearTimeout(copyStatusTimeoutRef.current)
-      }
-    }
-  }, [])
 
   useEffect(() => {
     if (lightboxIndex === null) {
@@ -2309,17 +2167,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     const todaysJobs = jobs.filter((job) => job.date === activeDate)
     return Math.min(1, todaysJobs.length / maxJobs)
   }, [jobs, activeDate, policy.maxJobsPerDay])
-  const hasFreshKudos = useMemo(
-    () =>
-      SAMPLE_KUDOS.some((entry) => {
-        const timestamp = new Date(entry.timestamp).getTime()
-        if (Number.isNaN(timestamp)) {
-          return false
-        }
-        return Date.now() - timestamp < 1000 * 60 * 60 * 24 * 3
-      }),
-    [],
-  )
+  const hasFreshKudos = INITIAL_HAS_FRESH_KUDOS
   const handleViewSelect = useCallback(
     (next: View) => {
       setView(next)
@@ -3455,17 +3303,6 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   )
 }
 
-type LoginPopoverProps = {
-  crewNames: string[]
-  selectedName: string
-  onSelectName: (value: string) => void
-  pin: string
-  onPinChange: (value: string) => void
-  error: string | null
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void
-  pinRef: RefObject<HTMLInputElement>
-}
-
 type StatusBadgeProps = {
   status?: JobMeta['status']
   variant?: 'default' | 'xl'
@@ -3505,64 +3342,11 @@ function StatusBadge({ status = 'Not started', variant = 'default' }: StatusBadg
   )
 }
 
-function LoginPopover({
-  crewNames,
-  selectedName,
-  onSelectName,
-  pin,
-  onPinChange,
-  error,
-  onSubmit,
-  pinRef,
-}: LoginPopoverProps) {
-  return (
-    <form className="space-y-5" onSubmit={onSubmit}>
-      <label className="flex flex-col gap-2 text-sm font-medium text-white/90">
-        Crew identity
-        <select
-          value={selectedName}
-          onChange={(event) => onSelectName(event.target.value)}
-          className="h-11 w-full rounded-lg border border-slate-700 bg-slate-950/60 px-3 text-sm text-white shadow-inner shadow-black/20 transition focus-visible:border-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/40"
-        >
-          {crewNames.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="flex flex-col gap-2 text-sm font-medium text-white/90">
-        PIN
-        <input
-          ref={pinRef}
-          type="password"
-          inputMode="numeric"
-          autoComplete="current-password"
-          value={pin}
-          onChange={(event) => onPinChange(event.target.value)}
-          className="h-11 w-full rounded-lg border border-slate-700 bg-slate-950/60 px-3 text-base tracking-[0.35em] text-white shadow-inner shadow-black/40 transition focus-visible:border-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/40"
-        />
-      </label>
-      {error && (
-        <p className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-100">
-          {error}
-        </p>
-      )}
-      <Button
-        type="submit"
-        className={`${THEME.cta} h-12 w-full text-base font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/40`}
-      >
-        Enter Ops
-      </Button>
-    </form>
-  )
-}
-
 function LoginGate({
   pin,
   setPin,
   onLogin,
-  defaultName = 'Luke',
+  defaultName = DEFAULT_LOGIN_CREW,
 }: {
   pin: string
   setPin: (v: string) => void
@@ -3570,7 +3354,7 @@ function LoginGate({
   defaultName?: string
 }) {
   const [name, setName] = React.useState(defaultName)
-  const crewNames = Object.keys(CREW_PINS)
+  const crewNames = CREW_NAMES
   const [status, setStatus] = React.useState<'idle' | 'submitting' | 'error' | 'success'>('idle')
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null)
 
@@ -3730,13 +3514,15 @@ function LoginShell({
   setPin: (value: string) => void
   onLogin: (name: string, pin: string) => boolean
 }) {
-  const crewNames = useMemo(() => Object.keys(CREW_PINS), [])
-  const gateDefault = crewNames[0] || 'Luke'
-
   return (
     <>
       <LayerHost />
-      <LoginGate pin={pin} setPin={setPin} onLogin={onLogin} defaultName={gateDefault} />
+      <LoginGate
+        pin={pin}
+        setPin={setPin}
+        onLogin={onLogin}
+        defaultName={DEFAULT_LOGIN_CREW}
+      />
     </>
   )
 }
@@ -4180,17 +3966,8 @@ function ProfileScreen({
   syncStatus: SyncState
   onSyncNow: () => void
 }) {
-  const initialAchievements = useMemo<Record<AchievementKey, string | null>>(
-    () => ({
-      five_streak: null,
-      route_master: new Date('2025-11-10T09:15:00Z').toISOString(),
-      client_favorite: null,
-    }),
-    [],
-  )
-
   const [achievements, setAchievements] = useState<Record<AchievementKey, string | null>>(
-    initialAchievements,
+    () => ({ ...INITIAL_ACHIEVEMENTS }),
   )
   const [unlockedBadge, setUnlockedBadge] = useState<AchievementKey | null>(null)
   const lastSyncLabel = useMemo(() => formatRelativeTimestamp(syncStatus.lastSyncedAt), [syncStatus.lastSyncedAt])
@@ -4403,7 +4180,7 @@ function ProfileScreen({
   )
 }
 
-export default function SONLApp() {
+export function SONLApp() {
   const [user, setUser] = useState<User | null>(null)
   const [pin, setPin] = useState('')
 
@@ -4442,4 +4219,53 @@ export default function SONLApp() {
   }
 
   return <AuthedShell user={user} onLogout={handleLogout} />
+}
+
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  private handleReset = () => {
+    this.setState({ error: null })
+    if (typeof window !== 'undefined') {
+      window.location.reload()
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen bg-slate-950 p-6 text-slate-100">
+          <div className="mx-auto flex h-full max-w-sm flex-col items-center justify-center gap-4 text-center">
+            <h1 className="text-2xl font-semibold">Something went wrong</h1>
+            <p className="text-sm text-slate-400">
+              {this.state.error.message || 'An unexpected error occurred.'}
+            </p>
+            <Button
+              onClick={this.handleReset}
+              className={`${THEME.cta} rounded-full px-6 py-2 text-sm font-semibold`}
+            >
+              Reset app
+            </Button>
+          </div>
+        </div>
+      )
+    }
+
+    return this.props.children
+  }
+}
+
+export default function App() {
+  return (
+    <AppErrorBoundary>
+      <SONLApp />
+    </AppErrorBoundary>
+  )
 }
