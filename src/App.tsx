@@ -37,7 +37,7 @@ import {
   saveMeta,
   type JobMeta,
 } from '@/lib/jobmeta'
-import { cloudEnabled, ensureAnonAuth, db as cloudDb } from '@/lib/firebase'
+import { cloudEnabled, db as cloudDb } from '@/lib/firebase'
 import {
   enqueueSyncOp,
   subscribeFirestore,
@@ -58,6 +58,7 @@ import {
   Users,
   type LucideIcon,
 } from 'lucide-react'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import ReactDOM from "react-dom"
 import {
@@ -70,6 +71,7 @@ import {
 } from '@/lib/app-data'
 import { db } from '@/lib/db'
 import type { CrewOption, Job, JobCore, Policy, Role, User } from '@/lib/types'
+import CrewShell from '@/pages/crew/CrewShell'
 
 const LOGIN_BG = '/FINEASFLOADINGSCREEN.jpg' // place the file in /public
 
@@ -96,8 +98,6 @@ const fadeInVariants = {
   visible: { opacity: 1 },
 }
 
-type LeaderboardCategory = 'bonus' | 'speed' | 'quality'
-type ReactionEmoji = '🔥' | '💡' | '💪'
 type AchievementKey = 'five_streak' | 'route_master' | 'client_favorite'
 type View = 'route' | 'board' | 'hq' | 'docs' | 'profile'
 type BoardTab = 'clients' | 'admin'
@@ -110,118 +110,6 @@ const STORAGE_SOURCE_LABEL: Record<BootstrapSource, string> = {
   'legacy-localStorage': 'Legacy migration',
   fallback: 'In-memory fallback',
 }
-
-type CrewMember = {
-  id: string
-  name: string
-  crew: string
-  stats: {
-    efficiencyBonuses: number
-    averageInstallTime: number
-    totalKudos: number
-  }
-}
-
-type KudosEntry = {
-  id: string
-  crew: string
-  message: string
-  image: string
-  timestamp: string
-  reactions: Record<ReactionEmoji, number>
-}
-
-const SAMPLE_CREW_MEMBERS: CrewMember[] = [
-  {
-    id: 'luke',
-    name: 'Luke',
-    crew: 'Crew Alpha',
-    stats: {
-      efficiencyBonuses: 18,
-      averageInstallTime: 2.4,
-      totalKudos: 46,
-    },
-  },
-  {
-    id: 'maria',
-    name: 'Maria',
-    crew: 'Crew Bravo',
-    stats: {
-      efficiencyBonuses: 22,
-      averageInstallTime: 2.1,
-      totalKudos: 52,
-    },
-  },
-  {
-    id: 'darius',
-    name: 'Darius',
-    crew: 'Crew Alpha',
-    stats: {
-      efficiencyBonuses: 15,
-      averageInstallTime: 2.8,
-      totalKudos: 38,
-    },
-  },
-  {
-    id: 'ava',
-    name: 'Ava',
-    crew: 'Crew Support',
-    stats: {
-      efficiencyBonuses: 19,
-      averageInstallTime: 2.0,
-      totalKudos: 61,
-    },
-  },
-  {
-    id: 'jasper',
-    name: 'Jasper',
-    crew: 'Dispatcher',
-    stats: {
-      efficiencyBonuses: 12,
-      averageInstallTime: 3.1,
-      totalKudos: 33,
-    },
-  },
-]
-
-const SAMPLE_KUDOS: KudosEntry[] = [
-  {
-    id: 'k1',
-    crew: 'Crew Alpha',
-    message: 'Crushed the Country Ridge install in record time. Zero call-backs.',
-    image: '/sample/crew-alpha.jpg',
-    timestamp: '2025-11-17T18:45:00Z',
-    reactions: {
-      '🔥': 12,
-      '💡': 3,
-      '💪': 8,
-    },
-  },
-  {
-    id: 'k2',
-    crew: 'Crew Bravo',
-    message: 'Maria and team re-lit Patriot Subdivision after the storm. Residents ecstatic.',
-    image: '/sample/crew-bravo.jpg',
-    timestamp: '2025-11-15T23:12:00Z',
-    reactions: {
-      '🔥': 7,
-      '💡': 5,
-      '💪': 11,
-    },
-  },
-  {
-    id: 'k3',
-    crew: 'Crew Support',
-    message: 'Ava turned around three VIP calls in one afternoon, new seasonal record.',
-    image: '/sample/crew-support.jpg',
-    timestamp: '2025-11-14T15:02:00Z',
-    reactions: {
-      '🔥': 5,
-      '💡': 9,
-      '💪': 6,
-    },
-  },
-]
 
 const crewOptions: CrewOption[] = ['Crew Alpha', 'Crew Bravo', 'Both Crews']
 
@@ -812,6 +700,10 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const suppressJobsQueueRef = useRef(false)
   const previousPolicyRef = useRef<Policy>(sanitizedDefaultPolicy)
   const suppressPolicyQueueRef = useRef(false)
+  const location = useLocation()
+  const navigate = useNavigate()
+  const lastPrimaryViewRef = useRef<View>('route')
+  const isCrewRoute = location.pathname.startsWith('/crew')
 
   const [scheduleForm, setScheduleForm] = useState<JobFormState>(() =>
     createEmptyForm({ date: activeDate }),
@@ -2309,26 +2201,38 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     const todaysJobs = jobs.filter((job) => job.date === activeDate)
     return Math.min(1, todaysJobs.length / maxJobs)
   }, [jobs, activeDate, policy.maxJobsPerDay])
-  const hasFreshKudos = useMemo(
-    () =>
-      SAMPLE_KUDOS.some((entry) => {
-        const timestamp = new Date(entry.timestamp).getTime()
-        if (Number.isNaN(timestamp)) {
-          return false
-        }
-        return Date.now() - timestamp < 1000 * 60 * 60 * 24 * 3
-      }),
-    [],
-  )
+  const hasFreshKudos = false
   const handleViewSelect = useCallback(
     (next: View) => {
+      if (next === 'hq') {
+        if (!isCrewRoute) {
+          navigate('/crew/profiles')
+        }
+        setView('hq')
+        return
+      }
+      lastPrimaryViewRef.current = next
       setView(next)
+      if (isCrewRoute) {
+        navigate('/')
+      }
       if (next === 'board') {
         setBoardTab('clients')
       }
     },
-    [setBoardTab, setView],
+    [isCrewRoute, navigate, setBoardTab],
   )
+
+  useEffect(() => {
+    if (isCrewRoute) {
+      if (view !== 'hq') {
+        lastPrimaryViewRef.current = view
+        setView('hq')
+      }
+    } else if (view === 'hq') {
+      setView(lastPrimaryViewRef.current)
+    }
+  }, [isCrewRoute, view])
 
   return (
     <>
@@ -2412,7 +2316,11 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
                 </div>
               </motion.div>
 
-              {view === 'route' && (
+              {isCrewRoute ? (
+                <CrewShell syncStatus={syncStatus} />
+              ) : (
+                <>
+                  {view === 'route' && (
         <motion.div
           variants={fadeInVariants}
           initial="hidden"
@@ -3356,15 +3264,16 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
           </Card>
         </motion.div>
       )}
-      {view === 'hq' && <CrewHQ />}
-      {view === 'profile' && (
-        <ProfileScreen
-          user={user}
-          onLogout={onLogout}
-          syncStatus={syncStatus}
-          onSyncNow={syncNow}
-        />
-      )}
+                  {view === 'profile' && (
+                    <ProfileScreen
+                      user={user}
+                      onLogout={onLogout}
+                      syncStatus={syncStatus}
+                      onSyncNow={syncNow}
+                    />
+                  )}
+                </>
+              )}
             </div>
           </div>
         </main>
@@ -3776,7 +3685,7 @@ function BottomNav({ activeView, onSelect, routeProgress, hasCrewBadge }: Bottom
     [
       { key: 'route', label: 'Route', icon: MapIcon, showProgress: true },
       { key: 'board', label: 'Board', icon: LayoutDashboard },
-      { key: 'hq', label: 'Crew HQ', icon: Users, badge: hasCrewBadge },
+      { key: 'hq', label: 'Crew', icon: Users, badge: hasCrewBadge },
       { key: 'docs', label: 'Docs', icon: FileText },
       { key: 'profile', label: 'Profile', icon: UserRound },
     ]
@@ -3878,296 +3787,6 @@ function BottomNav({ activeView, onSelect, routeProgress, hasCrewBadge }: Bottom
   )
 }
 
-function CrewHQ() {
-  const [category, setCategory] = useState<LeaderboardCategory>('bonus')
-  const [kudosEntries, setKudosEntries] = useState(() =>
-    SAMPLE_KUDOS.map((entry) => ({
-      ...entry,
-      reactions: { ...entry.reactions },
-    })),
-  )
-  const [floatingReactions, setFloatingReactions] = useState<
-    { id: number; kudoId: string; emoji: ReactionEmoji }[]
-  >([])
-
-  const getStatValue = useCallback(
-    (member: CrewMember) => {
-      switch (category) {
-        case 'bonus':
-          return member.stats.efficiencyBonuses
-        case 'speed':
-          return member.stats.averageInstallTime
-        case 'quality':
-          return member.stats.totalKudos
-        default:
-          return 0
-      }
-    },
-    [category],
-  )
-
-  const sortedMembers = useMemo(() => {
-    const members = [...SAMPLE_CREW_MEMBERS]
-    members.sort((a, b) => {
-      const aVal = getStatValue(a)
-      const bVal = getStatValue(b)
-      if (category === 'speed') {
-        return aVal - bVal
-      }
-      return bVal - aVal
-    })
-    return members
-  }, [category, getStatValue])
-
-  const podium = sortedMembers.slice(0, 3)
-  const leaderboardRest = sortedMembers.slice(3)
-  const topValue = podium.length ? getStatValue(podium[0]) : 0
-
-  const categoryMeta: Record<LeaderboardCategory, { label: string; description: string }> = {
-    bonus: { label: 'Bonus Kings', description: 'Highest efficiency bonuses earned YTD' },
-    speed: { label: 'Speed Demons', description: 'Fastest average install time (lower is better)' },
-    quality: { label: 'Quality Captains', description: 'Most kudos received from clients' },
-  }
-
-  const formatStat = (value: number) => {
-    if (category === 'speed') {
-      return `${value.toFixed(1)}h`
-    }
-    return value.toString()
-  }
-
-  const sortedKudos = useMemo(
-    () =>
-      [...kudosEntries].sort(
-        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-      ),
-    [kudosEntries],
-  )
-
-  const handleReact = (kudoId: string, emoji: ReactionEmoji) => {
-    setKudosEntries((prev) =>
-      prev.map((entry) =>
-        entry.id === kudoId
-          ? {
-              ...entry,
-              reactions: {
-                ...entry.reactions,
-                [emoji]: (entry.reactions[emoji] ?? 0) + 1,
-              },
-            }
-          : entry,
-      ),
-    )
-
-    const id = Date.now() + Math.random()
-    setFloatingReactions((prev) => [...prev, { id, kudoId, emoji }])
-    window.setTimeout(() => {
-      setFloatingReactions((prev) => prev.filter((item) => item.id !== id))
-    }, 700)
-  }
-
-  const progressRatio = (value: number) => {
-    if (!topValue) {
-      return 0
-    }
-    if (category === 'speed') {
-      if (value === 0) {
-        return 1
-      }
-      return Math.min(1, Math.max(0.05, topValue / value))
-    }
-    return Math.min(1, Math.max(0.05, value / topValue))
-  }
-
-  const reactionEmojis: ReactionEmoji[] = ['🔥', '💡', '💪']
-
-  return (
-    <div className="space-y-6 pb-24">
-      <section className={`space-y-6 ${THEME.panel} p-6`}>
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-semibold text-white">Crew leaderboard</h2>
-            <p className="text-sm text-slate-400">See which crews are leading the charge.</p>
-          </div>
-          <div className="flex gap-2">
-            {(
-              [
-                { key: 'bonus', label: 'Bonus Kings' },
-                { key: 'speed', label: 'Speed Demons' },
-                { key: 'quality', label: 'Quality Captains' },
-              ] as { key: LeaderboardCategory; label: string }[]
-            ).map((item) => (
-              <button
-                key={item.key}
-                onClick={() => setCategory(item.key)}
-                className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
-                  category === item.key
-                    ? 'border-amber-400 bg-amber-500/10 text-amber-200'
-                    : 'border-slate-700 bg-slate-900/60 text-slate-300 hover:border-amber-400/40 hover:bg-slate-900/80'
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-5">
-          <div className="flex flex-col gap-6">
-            <div>
-              <h3 className="text-lg font-semibold text-white">{categoryMeta[category].label}</h3>
-              <p className="text-sm text-slate-400">{categoryMeta[category].description}</p>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-3">
-              {podium.map((member, index) => {
-                const value = getStatValue(member)
-                const podiumStyles = [
-                  'from-amber-500/50 via-amber-400/30 to-amber-500/10 border-amber-400',
-                  'from-slate-500/40 via-slate-600/30 to-slate-700/20 border-slate-500',
-                  'from-orange-500/40 via-orange-400/30 to-orange-300/20 border-orange-400',
-                ]
-                const gradients = podiumStyles[index] ?? podiumStyles[podiumStyles.length - 1]
-                const placeLabel = ['1st', '2nd', '3rd'][index] ?? `${index + 1}th`
-                return (
-                  <motion.div
-                    key={member.id}
-                    variants={cardVariants}
-                    initial="hidden"
-                    animate="visible"
-                    transition={{ duration: 0.35, delay: index * 0.05 }}
-                    className={`relative overflow-hidden rounded-2xl border bg-gradient-to-br ${gradients} p-5 shadow-lg`}
-                  >
-                    <span className="text-sm font-semibold uppercase tracking-wide text-white/80">
-                      {placeLabel}
-                    </span>
-                    <h4 className="mt-2 text-xl font-semibold text-white">{member.name}</h4>
-                    <p className="text-sm text-white/70">{member.crew}</p>
-                    <div className="mt-6">
-                      <p className="text-xs uppercase tracking-wide text-white/60">Score</p>
-                      <p className="text-2xl font-semibold text-amber-200">{formatStat(value)}</p>
-                    </div>
-                  </motion.div>
-                )
-              })}
-            </div>
-
-            {leaderboardRest.length > 0 && (
-              <div className="space-y-3">
-                {leaderboardRest.map((member, idx) => {
-                  const value = getStatValue(member)
-                  const ratio = progressRatio(value)
-                  return (
-                    <motion.div
-                      key={member.id}
-                      variants={cardVariants}
-                      initial="hidden"
-                      animate="visible"
-                      transition={{ duration: 0.25, delay: idx * 0.03 }}
-                      className="rounded-xl border border-slate-800 bg-slate-900/40 p-4"
-                    >
-                      <div className="flex items-center justify-between text-sm text-slate-300">
-                        <div className="flex items-center gap-2">
-                          <span className="text-slate-500">{idx + 4}</span>
-                          <div>
-                            <p className="font-semibold text-white">{member.name}</p>
-                            <p className="text-xs text-slate-400">{member.crew}</p>
-                          </div>
-                        </div>
-                        <span className="text-amber-300 font-semibold">{formatStat(value)}</span>
-                      </div>
-                      <div className="mt-3 h-2 rounded-full bg-slate-800">
-                        <div
-                          className="h-full rounded-full bg-amber-500"
-                          style={{ width: `${Math.max(10, ratio * 100)}%` }}
-                        />
-                      </div>
-                    </motion.div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      </section>
-
-      <section className={`space-y-5 ${THEME.panel} p-6`}>
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-white">Crew kudos</h2>
-            <p className="text-sm text-slate-400">Client and crew shout-outs with emoji love.</p>
-          </div>
-        </div>
-
-        <div className="grid gap-6 lg:grid-cols-2">
-          {sortedKudos.map((entry, index) => (
-            <motion.div
-              key={entry.id}
-              variants={cardVariants}
-              initial="hidden"
-              animate="visible"
-              transition={{ duration: 0.35, delay: index * 0.05 }}
-              className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 shadow-lg"
-            >
-              <div className="relative aspect-video">
-                <img
-                  src={entry.image}
-                  alt={entry.message}
-                  className="absolute inset-0 h-full w-full object-cover"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-black/10" />
-                <div className="absolute inset-0 flex flex-col justify-end p-6 text-white">
-                  <p className="text-sm uppercase tracking-wide text-white/80">{entry.crew}</p>
-                  <p className="mt-2 text-lg font-semibold">{entry.message}</p>
-                  <p className="text-xs text-white/70">
-                    {new Date(entry.timestamp).toLocaleString(undefined, {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: 'numeric',
-                      minute: '2-digit',
-                    })}
-                  </p>
-                </div>
-                <AnimatePresence>
-                  {floatingReactions
-                    .filter((item) => item.kudoId === entry.id)
-                    .map((item) => (
-                      <motion.span
-                        key={item.id}
-                        initial={{ opacity: 0, y: 16 }}
-                        animate={{ opacity: 1, y: -20 }}
-                        exit={{ opacity: 0, y: -36 }}
-                        transition={{ duration: 0.6, ease: 'easeOut' }}
-                        className="pointer-events-none absolute right-6 bottom-6 text-2xl"
-                      >
-                        {item.emoji}
-                      </motion.span>
-                    ))}
-                </AnimatePresence>
-              </div>
-
-              <div className="flex items-center justify-between gap-4 p-4">
-                <div className="flex items-center gap-3">
-                  {reactionEmojis.map((emoji) => (
-                    <motion.button
-                      key={emoji}
-                      onClick={() => handleReact(entry.id, emoji)}
-                      whileTap={{ scale: 0.92 }}
-                      className="flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-sm text-slate-200 transition hover:border-amber-400 hover:text-amber-300"
-                    >
-                      <span className="text-lg">{emoji}</span>
-                      <span className="font-semibold">{entry.reactions[emoji] ?? 0}</span>
-                    </motion.button>
-                  ))}
-                </div>
-              </div>
-            </motion.div>
-          ))}
-        </div>
-      </section>
-    </div>
-  )
-}
 
 function ProfileScreen({
   user,

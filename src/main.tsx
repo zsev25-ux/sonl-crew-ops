@@ -2,18 +2,24 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App'
+import { BrowserRouter } from 'react-router-dom'
 
 try {
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
-  import('virtual:pwa-register').then(({ registerSW }) =>
+  void import('virtual:pwa-register').then(({ registerSW }) =>
     registerSW?.({
-      onOfflineReady() {},
+      onOfflineReady() {
+        // noop – we surface offline-ready state elsewhere
+      },
     }),
   )
-} catch {}
+} catch (error) {
+  console.warn('PWA registration skipped', error)
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
   </StrictMode>,
 )
