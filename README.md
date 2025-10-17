@@ -119,3 +119,13 @@ The script reads `.env.local` for the `VITE_FIREBASE_*` credentials. It writes t
 - `jobs/{id}` – initial jobs used by the local seed data.
 
 Ensure anonymous auth is enabled in Firebase Auth before running the seed.
+
+## Preview Deploys
+
+Every commit pushes a preview build so the crew can QA changes without running the project locally:
+
+1. Add the following repository secrets so GitHub Actions can talk to Vercel: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`.
+2. On every push (including feature branches) and pull request, the **Vercel preview deploy** workflow installs dependencies with PNPM, runs `pnpm build`, and publishes a preview using those credentials. The workflow log prints the deployment URL in the `Preview URL` step—copy that link to share the build.
+3. Pushes to `main` also trigger the **Build artifact** workflow, which uploads the `dist/` folder as a downloadable build artifact for teammates who need the static bundle.
+
+With those two workflows wired up, each commit automatically produces both a shareable preview URL and an archived production build.
