@@ -17,7 +17,14 @@ import {
   type PendingOpType,
 } from '@/lib/db'
 import type { Job, Policy } from '@/lib/types'
-import { normalizeJobMeta } from '@/lib/jobmeta'
+import { parseJob, JobValidationError } from '@/lib/job-schema'
+import {
+  safeSerialize,
+  stripUndefined,
+  type SanitizeReport,
+  type SanitizeChange,
+} from '@/lib/sanitize'
+import { pushToast } from '@/lib/notifications'
 import {
   collection,
   deleteDoc,
@@ -51,6 +58,7 @@ export type SyncState = {
   queued: number
   lastError: string | null
   lastSyncedAt: number | null
+  lastSanitizedAt: number | null
 }
 
 export type PendingOpPayload =
@@ -73,9 +81,73 @@ let syncState: SyncState = {
   queued: 0,
   lastError: null,
   lastSyncedAt: null,
+  lastSanitizedAt: null,
 }
 
 const listeners = new Set<(state: SyncState) => void>()
+const sanitizeNotices = new Map<string, { removed: string[]; changed: string[] }>()
+
+const publishSanitizeDiagnostics = (
+  docPath: string,
+  report: SanitizeReport,
+  parseChanges: SanitizeChange[],
+  warnings: string[],
+  options: { skipCache?: boolean; notify?: boolean } = {},
+): void => {
+  report.removed = report.removed.filter((entry) => {
+    const segments = entry.split('.').filter(Boolean)
+    const last = segments[segments.length - 1]
+    return last !== 'meta'
+  })
+  if (report.removed.length === 0 && parseChanges.length === 0 && warnings.length === 0) {
+    return
+  }
+
+  const removedKeys = Array.from(
+    new Set(
+      report.removed
+        .map((entry) => {
+          const segments = entry.split('.').filter(Boolean)
+          return segments[segments.length - 1] ?? entry
+        })
+        .filter((entry) => entry.length > 0),
+    ),
+  )
+
+  const changedKeys = Array.from(
+    new Set(parseChanges.map((change) => change.path).filter((path) => path.length > 0)),
+  )
+
+  const existing = options.skipCache ? undefined : sanitizeNotices.get(docPath)
+  if (!existing) {
+    console.warn('[sanitize]', docPath, {
+      removed: removedKeys,
+      changes: parseChanges,
+      warnings,
+    })
+    if (!options.skipCache) {
+      sanitizeNotices.set(docPath, { removed: removedKeys, changed: changedKeys })
+    }
+    if (warnings.length > 0) {
+      console.warn('[sanitize][warnings]', docPath, warnings)
+    }
+  }
+
+  const now = Date.now()
+  const shouldNotifyRemoval = removedKeys.length > 0 && (!existing || options.skipCache)
+  const shouldNotify = options.notify ?? true
+  if (shouldNotifyRemoval && shouldNotify) {
+    const fieldLabel =
+      removedKeys.length === 1
+        ? `invalid field “${removedKeys[0]}” (undefined)`
+        : `invalid fields ${removedKeys.map((key) => `“${key}”`).join(', ')} (undefined)`
+    const message = `Sync blocked: ${fieldLabel}. Fixed automatically and retried.`
+    pushToast(message, 'warning')
+    setSyncState({ lastError: message, lastSanitizedAt: now })
+  } else {
+    setSyncState({ lastSanitizedAt: now })
+  }
+}
 
 const emit = () => {
   for (const listener of listeners) {
@@ -459,21 +531,20 @@ const performJobWrite = async (job: Job, opId: string) => {
   if (!cloudDb) {
     throw new Error('Firestore unavailable')
   }
-  const target = doc(cloudDb, 'jobs', String(job.id))
-  const jobPayload: Job = {
-    ...job,
-    meta: job.meta ? normalizeJobMeta(job.meta) : undefined,
+  const { job: normalized, changes, warnings } = parseJob(job)
+  const report: SanitizeReport = { removed: [], changes: [] }
+  const sanitized = safeSerialize(normalized, { report })
+  const docPath = `jobs/${normalized.id}`
+  publishSanitizeDiagnostics(docPath, report, changes, warnings)
+
+  const payload = {
+    ...sanitized,
+    bothCrews: sanitized.crew === 'Both Crews',
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
   }
-  await setDoc(
-    target,
-    {
-      ...jobPayload,
-      bothCrews: jobPayload.crew === 'Both Crews',
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
+
+  await setDoc(doc(cloudDb, 'jobs', String(normalized.id)), payload, { merge: true })
 }
 
 const performJobDelete = async (jobId: number) => {
@@ -487,10 +558,16 @@ const performPolicyUpdate = async (policy: Policy, opId: string) => {
   if (!cloudDb) {
     return
   }
+  const report: SanitizeReport = { removed: [], changes: [] }
+  const sanitized = stripUndefined(policy, report)
+  if (report.removed.length > 0) {
+    console.warn('[sanitize][policy]', report.removed)
+    setSyncState({ lastSanitizedAt: Date.now() })
+  }
   await setDoc(
     doc(cloudDb, 'config', 'policy'),
     {
-      ...policy,
+      ...sanitized,
       updatedAt: serverTimestamp(),
       lastOpId: opId,
     },
@@ -553,8 +630,8 @@ const performMediaUpload = async (
   })
 
   const remoteUrl = await getDownloadURL(uploadTask.snapshot.ref)
-  await setDoc(
-    doc(cloudDb, 'jobs', String(jobId), 'media', mediaId),
+  const mediaReport: SanitizeReport = { removed: [], changes: [] }
+  const mediaPayload = safeSerialize(
     {
       id: mediaId,
       jobId,
@@ -565,6 +642,17 @@ const performMediaUpload = async (
       width: media.width,
       height: media.height,
       name: mediaId,
+    },
+    { report: mediaReport },
+  )
+  if (mediaReport.removed.length > 0) {
+    console.warn('[sanitize][media]', mediaId, mediaReport)
+    setSyncState({ lastSanitizedAt: Date.now() })
+  }
+  await setDoc(
+    doc(cloudDb, 'jobs', String(jobId), 'media', mediaId),
+    {
+      ...mediaPayload,
       updatedAt: serverTimestamp(),
       lastOpId: opId,
     },
@@ -701,11 +789,30 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
   switch (op.type) {
     case 'job.add':
     case 'job.update':
-      payload = {
-        job: {
-          ...op.job,
-          meta: op.job.meta ? normalizeJobMeta(op.job.meta) : undefined,
-        },
+      try {
+        const { job: normalized, changes, warnings } = parseJob(op.job)
+        const report: SanitizeReport = { removed: [], changes: [] }
+        const sanitized = safeSerialize(normalized, { report })
+        publishSanitizeDiagnostics(`pendingOps/${sanitized.id}`, report, changes, warnings, {
+          skipCache: true,
+          notify: false,
+        })
+        payload = { job: sanitized }
+      } catch (error) {
+        const docId =
+          typeof op.job?.id === 'number' || typeof op.job?.id === 'string'
+            ? op.job.id
+            : 'unknown'
+        const message = `Sync failed: invalid data in “jobs/${docId}”. See console for fields.`
+        console.error('Failed to enqueue job operation due to invalid payload', error)
+        pushToast(message, 'error')
+        setSyncState({ status: 'error', lastError: message })
+        if (error instanceof JobValidationError) {
+          error.issues.forEach((issue) => {
+            console.error('[job-validation]', issue.path.join('.') || '(root)', issue.message)
+          })
+        }
+        throw error
       }
       break
     case 'job.delete':

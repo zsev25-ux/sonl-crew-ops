@@ -15,6 +15,8 @@ export type JobCore = {
   rehangPrice?: number
   lifetimeSpend?: number
   vip?: boolean
+  bothCrews?: boolean
+  updatedAt?: number
   meta?: JobMeta
 }
 
