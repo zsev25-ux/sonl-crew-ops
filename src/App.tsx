@@ -8,6 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react'
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -21,13 +22,11 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { loadClientsFromFile, loadClientsFromPublic, type Client } from '@/lib/clients'
 import {
+  addLocalMedia,
   deleteMedia,
-  listLocalMedia,
   listMedia,
-  migrateLocalMediaToCloud,
   revokeMediaUrls,
-  saveImage,
-  saveVideo,
+  syncRemoteMedia,
   type JobMedia,
 } from '@/lib/media'
 import {
@@ -48,6 +47,8 @@ import {
   type SyncState,
   type PendingOpPayload,
 } from '@/lib/sync'
+import { runLocalDataCleanup } from '@/lib/maintenance'
+import { showToast } from '@/lib/toast'
 import { AnimatePresence, LayoutGroup, motion } from 'framer-motion'
 import {
   FileText,
@@ -71,7 +72,10 @@ import {
 } from '@/lib/app-data'
 import { db } from '@/lib/db'
 import type { CrewOption, Job, JobCore, Policy, Role, User } from '@/lib/types'
-import CrewShell from '@/pages/crew/CrewShell'
+import Profiles from './pages/crew/Profiles'
+import ProfileDetail from './pages/crew/ProfileDetail'
+import Leaderboards from './pages/crew/Leaderboards'
+import Awards from './pages/crew/Awards'
 
 const LOGIN_BG = '/FINEASFLOADINGSCREEN.jpg' // place the file in /public
 
@@ -99,7 +103,7 @@ const fadeInVariants = {
 }
 
 type AchievementKey = 'five_streak' | 'route_master' | 'client_favorite'
-type View = 'route' | 'board' | 'hq' | 'docs' | 'profile'
+type View = 'route' | 'board' | 'hq' | 'inventory' | 'profile'
 type BoardTab = 'clients' | 'admin'
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>
@@ -422,20 +426,17 @@ const createEmptyForm = (
   }
 }
 
-const toOptionalString = (value: string): string | undefined => {
-  const trimmed = value.trim()
-  return trimmed ? trimmed : undefined
-}
+const toOptionalString = (value: string): string => value.trim()
 
-const toOptionalNumber = (value: string): number | undefined => {
+const toOptionalNumber = (value: string): number => {
   const trimmed = value.trim()
   if (!trimmed) {
-    return undefined
+    return 0
   }
 
   const sanitized = trimmed.replace(/[$,]/g, '')
   const parsed = Number(sanitized)
-  return Number.isFinite(parsed) ? parsed : undefined
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 const toJobPayload = (form: JobFormState): JobCore => {
@@ -748,8 +749,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [mediaLoading, setMediaLoading] = useState(false)
   const [mediaError, setMediaError] = useState<string | null>(null)
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
-  const [localMediaItems, setLocalMediaItems] = useState<JobMedia[]>([])
-  const [migrationInProgress, setMigrationInProgress] = useState(false)
+  const [mediaSyncing, setMediaSyncing] = useState(false)
 
   const [copyStatus, setCopyStatus] = useState<string | null>(null)
   const copyStatusTimeoutRef = useRef<number | null>(null)
@@ -1223,13 +1223,12 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
 
   const dayOverCapacity = plannedHoursForActiveDay > HOURS_PER_DAY_LIMIT
 
-  const needsMigration =
-    cloudEnabled &&
-    !mediaLoading &&
-    !migrationInProgress &&
-    !jobMetaDraft.migrated &&
-    localMediaItems.length > 0 &&
-    mediaItems.length === 0
+  const unsyncedMediaCount = useMemo(
+    () => mediaItems.filter((item) => item.status !== 'synced').length,
+    [mediaItems],
+  )
+
+  const needsMigration = cloudEnabled && unsyncedMediaCount > 0
 
   useEffect(() => {
     if (
@@ -1244,6 +1243,11 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     lightboxIndex !== null && mediaItems[lightboxIndex]
       ? mediaItems[lightboxIndex]
       : null
+
+  const currentLightboxPreview = currentLightboxItem
+    ? currentLightboxItem.previewUrl ?? currentLightboxItem.remoteUrl ?? currentLightboxItem.localUrl ?? ''
+    : ''
+  const currentLightboxIsImage = Boolean(currentLightboxItem?.type?.startsWith('image/'))
 
   const openLightbox = useCallback((index: number) => {
     setLightboxIndex(index)
@@ -1446,40 +1450,41 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         return
       }
 
-      const files = Array.from(fileList)
       const jobIdKey = String(activeJob.id)
+      const files = Array.from(fileList).filter(
+        (file) => file.type.startsWith('image/') || file.type.startsWith('video/'),
+      )
+
+      if (files.length === 0) {
+        return
+      }
 
       setMediaLoading(true)
       setMediaError(null)
 
       try {
-        const uploads = files
-          .filter((file) => file.type.startsWith('image/') || file.type.startsWith('video/'))
-          .map((file) =>
-            file.type.startsWith('image/')
-              ? saveImage(jobIdKey, file)
-              : saveVideo(jobIdKey, file),
-          )
-
-        if (uploads.length === 0) {
-          return
+        const createdIds: string[] = []
+        for (const file of files) {
+          const id = await addLocalMedia(file, jobIdKey)
+          createdIds.push(id)
+          if (cloudEnabled) {
+            await enqueueSyncOp({ type: 'media.upload', mediaId: id })
+          }
         }
 
-        await Promise.all(uploads)
-        const refreshed = await listMedia(jobIdKey)
-        setMediaItems((prev) => {
-          if (prev.length > 0) {
-            revokeMediaUrls(prev)
-          }
-          return refreshed
-        })
         if (cloudEnabled) {
-          const local = await listLocalMedia(jobIdKey)
-          setLocalMediaItems((prev) => {
+          await syncRemoteMedia(jobIdKey).catch((error) => {
+            console.warn('Unable to refresh media after upload', error)
+          })
+        }
+
+        if (createdIds.length > 0) {
+          const refreshed = await listMedia(jobIdKey)
+          setMediaItems((prev) => {
             if (prev.length > 0) {
               revokeMediaUrls(prev)
             }
-            return local
+            return refreshed
           })
         }
         setMediaError(null)
@@ -1487,13 +1492,13 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         setMediaError(
           error instanceof Error
             ? error.message
-            : 'Unable to upload media for this job.',
+            : 'Unable to save media for this job.',
         )
       } finally {
         setMediaLoading(false)
       }
     },
-    [activeJob],
+    [activeJob, cloudEnabled],
   )
 
   const handleDeleteMedia = useCallback(
@@ -1505,7 +1510,12 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
       const jobIdKey = String(activeJob.id)
       setMediaLoading(true)
       try {
-        await deleteMedia(jobIdKey, id)
+        await deleteMedia(id)
+        if (cloudEnabled) {
+          await syncRemoteMedia(jobIdKey).catch((error) => {
+            console.warn('Unable to refresh media after deletion', error)
+          })
+        }
         const refreshed = await listMedia(jobIdKey)
         setMediaItems((prev) => {
           if (prev.length > 0) {
@@ -1513,15 +1523,6 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
           }
           return refreshed
         })
-        if (cloudEnabled) {
-          const local = await listLocalMedia(jobIdKey)
-          setLocalMediaItems((prev) => {
-            if (prev.length > 0) {
-              revokeMediaUrls(prev)
-            }
-            return local
-          })
-        }
         setMediaError(null)
       } catch (error) {
         setMediaError(
@@ -1533,56 +1534,40 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         setMediaLoading(false)
       }
     },
-    [activeJob],
+    [activeJob, cloudEnabled],
   )
 
-  const handleMigrateMedia = useCallback(async () => {
+  const handleSyncMedia = useCallback(async () => {
     if (!activeJob || !cloudEnabled) {
       return
     }
 
     const jobIdKey = String(activeJob.id)
-    setMigrationInProgress(true)
+    setMediaSyncing(true)
     setMediaLoading(true)
     setMediaError(null)
 
     try {
-      const migrated = await migrateLocalMediaToCloud(jobIdKey)
+      await syncNow()
+      await syncRemoteMedia(jobIdKey)
       const refreshed = await listMedia(jobIdKey)
-
       setMediaItems((prev) => {
         if (prev.length > 0) {
           revokeMediaUrls(prev)
         }
         return refreshed
       })
-
-      setLocalMediaItems((prev) => {
-        if (prev.length > 0) {
-          revokeMediaUrls(prev)
-        }
-        return []
-      })
-
-      const updatedMeta: JobMeta = { ...jobMetaDraft, migrated: true }
-      setJobMetaDraft(updatedMeta)
-      persistMetaForJob(activeJob.id, updatedMeta, { silent: true })
-      if (migrated.length > 0) {
-        setMetaStatusMessage('Media migrated to cloud')
-      } else {
-        setMetaStatusMessage('Local media already synced')
-      }
     } catch (error) {
       setMediaError(
         error instanceof Error
           ? error.message
-          : 'Unable to migrate media. Please try again.',
+          : 'Unable to sync media. Please try again.',
       )
     } finally {
-      setMigrationInProgress(false)
+      setMediaSyncing(false)
       setMediaLoading(false)
     }
-  }, [activeJob, jobMetaDraft, persistMetaForJob])
+  }, [activeJob, cloudEnabled])
 
   const handleCopyAddress = useCallback(() => {
     if (!activeJob) {
@@ -1672,13 +1657,6 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         }
         return []
       })
-      setLocalMediaItems((prev) => {
-        if (prev.length > 0) {
-          revokeMediaUrls(prev)
-        }
-        return []
-      })
-      setMigrationInProgress(false)
       setMediaError(null)
       setLightboxIndex(null)
       return
@@ -1699,13 +1677,17 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     notesPrevValueRef.current = meta.crewNotes
     setLightboxIndex(null)
     setMediaLoading(true)
-    setMigrationInProgress(false)
 
     const jobIdKey = String(activeJob.id)
     let cancelled = false
 
-    const loadRemoteMedia = async () => {
+    const loadMedia = async () => {
       try {
+        if (cloudEnabled) {
+          await syncRemoteMedia(jobIdKey).catch((error) => {
+            console.warn('Failed to refresh remote media', error)
+          })
+        }
         const items = await listMedia(jobIdKey)
         if (cancelled) {
           return
@@ -1739,41 +1721,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
       }
     }
 
-    loadRemoteMedia()
-
-    if (cloudEnabled) {
-      listLocalMedia(jobIdKey)
-        .then((localItems) => {
-          if (cancelled) {
-            return
-          }
-          setLocalMediaItems((prev) => {
-            if (prev.length > 0) {
-              revokeMediaUrls(prev)
-            }
-            return localItems
-          })
-        })
-        .catch((error) => {
-          if (cancelled) {
-            return
-          }
-          console.error('Unable to read local media cache', error)
-          setLocalMediaItems((prev) => {
-            if (prev.length > 0) {
-              revokeMediaUrls(prev)
-            }
-            return []
-          })
-        })
-    } else {
-      setLocalMediaItems((prev) => {
-        if (prev.length > 0) {
-          revokeMediaUrls(prev)
-        }
-        return []
-      })
-    }
+    void loadMedia()
 
     return () => {
       cancelled = true
@@ -1824,11 +1772,8 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
       if (mediaItems.length > 0) {
         revokeMediaUrls(mediaItems)
       }
-      if (localMediaItems.length > 0) {
-        revokeMediaUrls(localMediaItems)
-      }
     }
-  }, [mediaItems, localMediaItems])
+  }, [mediaItems])
 
   useEffect(() => {
     return () => {
@@ -2201,7 +2146,18 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     const todaysJobs = jobs.filter((job) => job.date === activeDate)
     return Math.min(1, todaysJobs.length / maxJobs)
   }, [jobs, activeDate, policy.maxJobsPerDay])
-  const hasFreshKudos = false
+  const unreadKudosCount = useMemo(() => {
+    return SAMPLE_KUDOS.reduce((count, entry) => {
+      const timestamp = new Date(entry.timestamp).getTime()
+      if (Number.isNaN(timestamp)) {
+        return count
+      }
+      if (Date.now() - timestamp < 1000 * 60 * 60 * 24 * 3) {
+        return count + 1
+      }
+      return count
+    }, 0)
+  }, [])
   const handleViewSelect = useCallback(
     (next: View) => {
       if (next === 'hq') {
@@ -2717,21 +2673,21 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
                         <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
                           <div className="flex flex-wrap items-center justify-between gap-3">
                             <span>
-                              {localMediaItems.length}{' '}
-                              {localMediaItems.length === 1
-                                ? 'local media item'
-                                : 'local media items'}{' '}
-                              ready to sync.
+                              {unsyncedMediaCount}{' '}
+                              {unsyncedMediaCount === 1
+                                ? 'media item'
+                                : 'media items'}{' '}
+                              queued for sync.
                             </span>
                             <Button
                               type="button"
                               className={`${THEME.cta} rounded-full px-4 py-2 text-sm font-semibold disabled:opacity-70`}
                               onClick={() => {
-                                void handleMigrateMedia()
+                                void handleSyncMedia()
                               }}
-                              disabled={migrationInProgress || mediaLoading}
+                              disabled={mediaSyncing || mediaLoading}
                             >
-                              {migrationInProgress ? 'Migrating…' : 'Migrate to cloud'}
+                              {mediaSyncing ? 'Syncing…' : 'Sync now'}
                             </Button>
                           </div>
                         </div>
@@ -2742,50 +2698,86 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
                         </div>
                       ) : (
                         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                          {mediaItems.map((item, index) => (
-                            <div
-                              key={item.id}
-                              className="group relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60"
-                            >
-                              {item.kind === 'image' ? (
-                                <button
-                                  type="button"
-                                  onClick={() => openLightbox(index)}
-                                  className="block w-full"
-                                >
-                                  <img
-                                    src={item.thumb ?? item.src}
-                                    alt={`${activeJob?.client ?? 'Job'} media ${index + 1}`}
-                                    className="h-36 w-full object-cover transition duration-200 group-hover:scale-105"
-                                  />
-                                </button>
-                              ) : (
-                                <div className="relative">
-                                  <video src={item.src} className="h-36 w-full object-cover" controls playsInline />
+                          {mediaItems.map((item, index) => {
+                            const preview = item.previewUrl ?? item.remoteUrl ?? item.localUrl ?? ''
+                            const isImage = item.type?.startsWith('image/')
+                            const isVideo = item.type?.startsWith('video/')
+                            const statusLabel =
+                              item.status === 'synced'
+                                ? 'Synced'
+                                : item.status === 'uploading'
+                                  ? 'Uploading…'
+                                  : item.status === 'queued'
+                                    ? 'Queued'
+                                    : item.status === 'error'
+                                      ? 'Error'
+                                      : 'Local'
+                            const statusTone =
+                              item.status === 'synced'
+                                ? 'bg-emerald-500/20 text-emerald-100 border border-emerald-500/40'
+                                : item.status === 'error'
+                                  ? 'bg-rose-500/20 text-rose-100 border border-rose-500/40'
+                                  : 'bg-amber-500/20 text-amber-100 border border-amber-500/40'
+
+                            return (
+                              <div
+                                key={item.id}
+                                className="group relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60"
+                              >
+                                {isImage && preview ? (
                                   <button
                                     type="button"
                                     onClick={() => openLightbox(index)}
-                                    className="absolute right-2 top-2 rounded-full bg-slate-900/80 px-2 py-1 text-[10px] uppercase tracking-wide text-slate-200 opacity-0 transition group-hover:opacity-100"
+                                    className="block w-full"
                                   >
-                                    Expand
+                                    <img
+                                      src={preview}
+                                      alt={`${activeJob?.client ?? 'Job'} media ${index + 1}`}
+                                      className="h-36 w-full object-cover transition duration-200 group-hover:scale-105"
+                                    />
                                   </button>
+                                ) : isVideo && preview ? (
+                                  <div className="relative">
+                                    <video
+                                      src={preview}
+                                      className="h-36 w-full object-cover"
+                                      controls
+                                      playsInline
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => openLightbox(index)}
+                                      className="absolute right-2 top-2 rounded-full bg-slate-900/80 px-2 py-1 text-[10px] uppercase tracking-wide text-slate-200 opacity-0 transition group-hover:opacity-100"
+                                    >
+                                      Expand
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex h-36 items-center justify-center bg-slate-900/40 text-xs text-slate-400">
+                                    No preview
+                                  </div>
+                                )}
+                                <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs">
+                                  <div className={`truncate ${THEME.subtext}`}>
+                                    {item.name || 'Untitled'}
+                                  </div>
+                                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusTone}`}>
+                                    {statusLabel}
+                                  </span>
                                 </div>
-                              )}
-                              {item.name && (
-                                <div className={`truncate px-3 py-2 text-xs ${THEME.subtext}`}>
-                                  {item.name}
-                                </div>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteMedia(item.id)}
-                                className="absolute right-2 bottom-2 rounded-full bg-slate-900/80 p-1.5 text-xs text-slate-200 opacity-0 transition group-hover:opacity-100 hover:bg-rose-600/90"
-                                aria-label="Delete media"
-                              >
-                                🗑
-                              </button>
-                            </div>
-                          ))}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    void handleDeleteMedia(item.id)
+                                  }}
+                                  className="absolute right-2 bottom-2 rounded-full bg-slate-900/80 p-1.5 text-xs text-slate-200 opacity-0 transition group-hover:opacity-100 hover:bg-rose-600/90"
+                                  aria-label="Delete media"
+                                >
+                                  🗑
+                                </button>
+                              </div>
+                            )
+                          })}
                         </div>
                       )}
                     </CardContent>
@@ -3233,7 +3225,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
           )}
         </motion.div>
       )}
-      {view === 'docs' && (
+      {view === 'inventory' && (
         <motion.div
           variants={fadeInVariants}
           initial="hidden"
@@ -3242,9 +3234,9 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         >
           <Card className={`rounded-2xl ${THEME.panel}`}>
             <CardHeader>
-              <CardTitle>Playbook</CardTitle>
+              <CardTitle>Inventory &amp; Playbook</CardTitle>
               <CardDescription className={THEME.subtext}>
-                Guardrails and reminders for the seasonal crew dispatch.
+                Guardrails, inventory pulls, and reminders for the seasonal crew dispatch.
               </CardDescription>
             </CardHeader>
             <CardContent className={`space-y-3 text-sm ${THEME.subtext}`}>
@@ -3278,10 +3270,11 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
           </div>
         </main>
         <BottomNav
-          activeView={view}
-          onSelect={handleViewSelect}
+          active={view}
+          setActive={handleViewSelect}
           routeProgress={routeProgress}
-          hasCrewBadge={hasFreshKudos}
+          unreadKudos={unreadKudosCount}
+          pendingSync={syncStatus.queued}
         />
       </div>
       <AnimatePresence>
@@ -3312,19 +3305,23 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
               >
                 Close
               </button>
-              {currentLightboxItem.kind === 'image' ? (
+              {currentLightboxIsImage && currentLightboxPreview ? (
                 <img
-                  src={currentLightboxItem.src}
-                  alt={currentLightboxItem.name ?? activeJob?.client ?? 'Job media'}
+                  src={currentLightboxPreview}
+                  alt={currentLightboxItem?.name ?? activeJob?.client ?? 'Job media'}
                   className="max-h-[80vh] w-full rounded-2xl object-contain"
                 />
-              ) : (
+              ) : currentLightboxPreview ? (
                 <video
-                  src={currentLightboxItem.src}
+                  src={currentLightboxPreview}
                   controls
                   autoPlay
                   className="max-h-[80vh] w-full rounded-2xl bg-black"
                 />
+              ) : (
+                <div className="flex h-[60vh] items-center justify-center rounded-2xl bg-slate-900 text-slate-300">
+                  Media preview unavailable.
+                </div>
               )}
               <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-200">
                 <div className="flex flex-col">
@@ -3673,120 +3670,296 @@ function LayerHost() {
   )
 }
 
-type BottomNavProps = {
-  activeView: View
-  onSelect: (view: View) => void
-  routeProgress: number
-  hasCrewBadge: boolean
-}
+function CrewHQ() {
+  const [category, setCategory] = useState<LeaderboardCategory>('bonus')
+  const [kudosEntries, setKudosEntries] = useState(() =>
+    SAMPLE_KUDOS.map((entry) => ({
+      ...entry,
+      reactions: { ...entry.reactions },
+    })),
+  )
+  const [floatingReactions, setFloatingReactions] = useState<
+    { id: number; kudoId: string; emoji: ReactionEmoji }[]
+  >([])
 
-function BottomNav({ activeView, onSelect, routeProgress, hasCrewBadge }: BottomNavProps) {
-  const navItems: { key: View; label: string; icon: LucideIcon; badge?: boolean; showProgress?: boolean }[] =
-    [
-      { key: 'route', label: 'Route', icon: MapIcon, showProgress: true },
-      { key: 'board', label: 'Board', icon: LayoutDashboard },
-      { key: 'hq', label: 'Crew', icon: Users, badge: hasCrewBadge },
-      { key: 'docs', label: 'Docs', icon: FileText },
-      { key: 'profile', label: 'Profile', icon: UserRound },
-    ]
-  const buttonRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
-      if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-        event.preventDefault()
-        const direction = event.key === 'ArrowRight' ? 1 : -1
-        const total = navItems.length
-        const nextIndex = (index + direction + total) % total
-        buttonRefs.current[nextIndex]?.focus()
+  const getStatValue = useCallback(
+    (member: CrewMember) => {
+      switch (category) {
+        case 'bonus':
+          return member.stats.efficiencyBonuses
+        case 'speed':
+          return member.stats.averageInstallTime
+        case 'quality':
+          return member.stats.totalKudos
+        default:
+          return 0
       }
     },
-    [navItems.length],
+    [category],
   )
 
+  const sortedMembers = useMemo(() => {
+    const members = [...SAMPLE_CREW_MEMBERS]
+    members.sort((a, b) => {
+      const aVal = getStatValue(a)
+      const bVal = getStatValue(b)
+      if (category === 'speed') {
+        return aVal - bVal
+      }
+      return bVal - aVal
+    })
+    return members
+  }, [category, getStatValue])
+
+  const podium = sortedMembers.slice(0, 3)
+  const leaderboardRest = sortedMembers.slice(3)
+  const topValue = podium.length ? getStatValue(podium[0]) : 0
+
+  const categoryMeta: Record<LeaderboardCategory, { label: string; description: string }> = {
+    bonus: { label: 'Bonus Kings', description: 'Highest efficiency bonuses earned YTD' },
+    speed: { label: 'Speed Demons', description: 'Fastest average install time (lower is better)' },
+    quality: { label: 'Quality Captains', description: 'Most kudos received from clients' },
+  }
+
+  const formatStat = (value: number) => {
+    if (category === 'speed') {
+      return `${value.toFixed(1)}h`
+    }
+    return value.toString()
+  }
+
+  const sortedKudos = useMemo(
+    () =>
+      [...kudosEntries].sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+      ),
+    [kudosEntries],
+  )
+
+  const handleReact = (kudoId: string, emoji: ReactionEmoji) => {
+    setKudosEntries((prev) =>
+      prev.map((entry) =>
+        entry.id === kudoId
+          ? {
+              ...entry,
+              reactions: {
+                ...entry.reactions,
+                [emoji]: (entry.reactions[emoji] ?? 0) + 1,
+              },
+            }
+          : entry,
+      ),
+    )
+
+    const id = Date.now() + Math.random()
+    setFloatingReactions((prev) => [...prev, { id, kudoId, emoji }])
+    window.setTimeout(() => {
+      setFloatingReactions((prev) => prev.filter((item) => item.id !== id))
+    }, 700)
+  }
+
+  const progressRatio = (value: number) => {
+    if (!topValue) {
+      return 0
+    }
+    if (category === 'speed') {
+      if (value === 0) {
+        return 1
+      }
+      return Math.min(1, Math.max(0.05, topValue / value))
+    }
+    return Math.min(1, Math.max(0.05, value / topValue))
+  }
+
+  const reactionEmojis: ReactionEmoji[] = ['🔥', '💡', '💪']
+
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40" aria-label="Primary navigation">
-      <div
-        className="mx-auto w-full max-w-3xl px-4"
-        style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 12px)' }}
-      >
-        <div className="relative overflow-hidden rounded-[28px] border border-slate-800/70 bg-slate-950/85 shadow-[0_32px_90px_rgba(5,8,18,0.9)] backdrop-blur-2xl">
-          <LayoutGroup>
-            <div className="grid grid-cols-5 gap-1 px-2 py-2" role="tablist">
-              {navItems.map((item, index) => {
-                const isActive = activeView === item.key
-                const Icon = item.icon
+    <div className="space-y-6 pb-24">
+      <section className={`space-y-6 ${THEME.panel} p-6`}>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-semibold text-white">Crew leaderboard</h2>
+            <p className="text-sm text-slate-400">See which crews are leading the charge.</p>
+          </div>
+          <div className="flex gap-2">
+            {(
+              [
+                { key: 'bonus', label: 'Bonus Kings' },
+                { key: 'speed', label: 'Speed Demons' },
+                { key: 'quality', label: 'Quality Captains' },
+              ] as { key: LeaderboardCategory; label: string }[]
+            ).map((item) => (
+              <button
+                key={item.key}
+                onClick={() => setCategory(item.key)}
+                className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
+                  category === item.key
+                    ? 'border-amber-400 bg-amber-500/10 text-amber-200'
+                    : 'border-slate-700 bg-slate-900/60 text-slate-300 hover:border-amber-400/40 hover:bg-slate-900/80'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-5">
+          <div className="flex flex-col gap-6">
+            <div>
+              <h3 className="text-lg font-semibold text-white">{categoryMeta[category].label}</h3>
+              <p className="text-sm text-slate-400">{categoryMeta[category].description}</p>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              {podium.map((member, index) => {
+                const value = getStatValue(member)
+                const podiumStyles = [
+                  'from-amber-500/50 via-amber-400/30 to-amber-500/10 border-amber-400',
+                  'from-slate-500/40 via-slate-600/30 to-slate-700/20 border-slate-500',
+                  'from-orange-500/40 via-orange-400/30 to-orange-300/20 border-orange-400',
+                ]
+                const gradients = podiumStyles[index] ?? podiumStyles[podiumStyles.length - 1]
+                const placeLabel = ['1st', '2nd', '3rd'][index] ?? `${index + 1}th`
                 return (
-                  <motion.button
-                    key={item.key}
-                    type="button"
-                    onClick={() => onSelect(item.key)}
-                    whileTap={{ scale: 0.94 }}
-                    ref={(node) => {
-                      buttonRefs.current[index] = node
-                    }}
-                    onKeyDown={(event) => handleKeyDown(event, index)}
-                    className="group relative flex min-h-[52px] flex-col items-center justify-center gap-2 rounded-3xl px-3 py-3 text-base font-bold text-slate-100 transition-all duration-200 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 focus-visible:ring-offset-0"
-                    aria-label={item.label}
-                    aria-current={isActive ? 'page' : undefined}
+                  <motion.div
+                    key={member.id}
+                    variants={cardVariants}
+                    initial="hidden"
+                    animate="visible"
+                    transition={{ duration: 0.35, delay: index * 0.05 }}
+                    className={`relative overflow-hidden rounded-2xl border bg-gradient-to-br ${gradients} p-5 shadow-lg`}
                   >
-                    {isActive && (
-                      <motion.span
-                        layoutId="nav-active"
-                        className="pointer-events-none absolute inset-0 rounded-3xl border border-amber-300/70 bg-amber-50/90 shadow-[0_14px_32px_rgba(245,158,11,0.35)] before:absolute before:inset-[2px] before:rounded-[inherit] before:bg-gradient-to-t before:from-amber-200/25 before:via-amber-50/10 before:to-transparent before:content-['']"
-                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                      />
-                    )}
-                    <motion.div
-                      animate={{ scale: isActive ? 1.08 : 1 }}
-                      transition={{ type: 'spring', stiffness: 320, damping: 24 }}
-                      className={`relative flex h-10 w-10 items-center justify-center rounded-[18px] transition-all duration-200 ${
-                        isActive
-                          ? 'text-amber-200 opacity-100 drop-shadow-[0_6px_12px_rgba(245,158,11,0.45)]'
-                          : 'text-slate-200 opacity-80 group-hover:opacity-95 group-focus-visible:opacity-95'
-                      }`}
-                    >
-                      <Icon
-                        className="h-5 w-5 transition-transform duration-200 group-hover:scale-[1.08] group-focus-visible:scale-[1.08] md:h-[22px] md:w-[22px]"
-                        aria-hidden="true"
-                      />
-                      {item.badge && (
-                        <motion.span
-                          layoutId={`${item.key}-badge`}
-                          className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full bg-amber-400 ring-2 ring-amber-200/80 ring-offset-1 ring-offset-slate-900 shadow-[0_0_14px_rgba(245,158,11,0.9)]"
-                          initial={{ scale: 0 }}
-                          animate={{ scale: 1 }}
-                        />
-                      )}
-                      {item.showProgress && routeProgress > 0 && (
-                        <motion.span
-                          className="absolute -bottom-1 left-1/2 h-1 w-10 -translate-x-1/2 rounded-full bg-amber-400/70"
-                          style={{ originX: 0.5 }}
-                          initial={{ scaleX: 0 }}
-                          animate={{ scaleX: Math.min(Math.max(routeProgress, 0.15), 1) }}
-                          transition={{ type: 'spring', stiffness: 260, damping: 30 }}
-                        />
-                      )}
-                    </motion.div>
-                    <span
-                      className={`relative mt-1 hidden w-full truncate text-center text-[0.95rem] transition-all duration-200 ease-out md:text-[1.05rem] ${
-                        isActive
-                          ? 'font-extrabold text-amber-200 drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]'
-                          : 'font-semibold tracking-wide text-slate-100/85 group-hover:text-slate-100 group-focus-visible:text-slate-100'
-                      } min-[420px]:block`}
-                    >
-                      {item.label}
+                    <span className="text-sm font-semibold uppercase tracking-wide text-white/80">
+                      {placeLabel}
                     </span>
-                  </motion.button>
+                    <h4 className="mt-2 text-xl font-semibold text-white">{member.name}</h4>
+                    <p className="text-sm text-white/70">{member.crew}</p>
+                    <div className="mt-6">
+                      <p className="text-xs uppercase tracking-wide text-white/60">Score</p>
+                      <p className="text-2xl font-semibold text-amber-200">{formatStat(value)}</p>
+                    </div>
+                  </motion.div>
                 )
               })}
             </div>
-          </LayoutGroup>
+
+            {leaderboardRest.length > 0 && (
+              <div className="space-y-3">
+                {leaderboardRest.map((member, idx) => {
+                  const value = getStatValue(member)
+                  const ratio = progressRatio(value)
+                  return (
+                    <motion.div
+                      key={member.id}
+                      variants={cardVariants}
+                      initial="hidden"
+                      animate="visible"
+                      transition={{ duration: 0.25, delay: idx * 0.03 }}
+                      className="rounded-xl border border-slate-800 bg-slate-900/40 p-4"
+                    >
+                      <div className="flex items-center justify-between text-sm text-slate-300">
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-500">{idx + 4}</span>
+                          <div>
+                            <p className="font-semibold text-white">{member.name}</p>
+                            <p className="text-xs text-slate-400">{member.crew}</p>
+                          </div>
+                        </div>
+                        <span className="text-amber-300 font-semibold">{formatStat(value)}</span>
+                      </div>
+                      <div className="mt-3 h-2 rounded-full bg-slate-800">
+                        <div
+                          className="h-full rounded-full bg-amber-500"
+                          style={{ width: `${Math.max(10, ratio * 100)}%` }}
+                        />
+                      </div>
+                    </motion.div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-    </nav>
+      </section>
+
+      <section className={`space-y-5 ${THEME.panel} p-6`}>
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-semibold text-white">Crew kudos</h2>
+            <p className="text-sm text-slate-400">Client and crew shout-outs with emoji love.</p>
+          </div>
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-2">
+          {sortedKudos.map((entry, index) => (
+            <motion.div
+              key={entry.id}
+              variants={cardVariants}
+              initial="hidden"
+              animate="visible"
+              transition={{ duration: 0.35, delay: index * 0.05 }}
+              className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 shadow-lg"
+            >
+              <div className="relative aspect-video">
+                <img
+                  src={entry.image}
+                  alt={entry.message}
+                  className="absolute inset-0 h-full w-full object-cover"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-black/10" />
+                <div className="absolute inset-0 flex flex-col justify-end p-6 text-white">
+                  <p className="text-sm uppercase tracking-wide text-white/80">{entry.crew}</p>
+                  <p className="mt-2 text-lg font-semibold">{entry.message}</p>
+                  <p className="text-xs text-white/70">
+                    {new Date(entry.timestamp).toLocaleString(undefined, {
+                      month: 'short',
+                      day: 'numeric',
+                      hour: 'numeric',
+                      minute: '2-digit',
+                    })}
+                  </p>
+                </div>
+                <AnimatePresence>
+                  {floatingReactions
+                    .filter((item) => item.kudoId === entry.id)
+                    .map((item) => (
+                      <motion.span
+                        key={item.id}
+                        initial={{ opacity: 0, y: 16 }}
+                        animate={{ opacity: 1, y: -20 }}
+                        exit={{ opacity: 0, y: -36 }}
+                        transition={{ duration: 0.6, ease: 'easeOut' }}
+                        className="pointer-events-none absolute right-6 bottom-6 text-2xl"
+                      >
+                        {item.emoji}
+                      </motion.span>
+                    ))}
+                </AnimatePresence>
+              </div>
+
+              <div className="flex items-center justify-between gap-4 p-4">
+                <div className="flex items-center gap-3">
+                  {reactionEmojis.map((emoji) => (
+                    <motion.button
+                      key={emoji}
+                      onClick={() => handleReact(entry.id, emoji)}
+                      whileTap={{ scale: 0.92 }}
+                      className="flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-sm text-slate-200 transition hover:border-amber-400 hover:text-amber-300"
+                    >
+                      <span className="text-lg">{emoji}</span>
+                      <span className="font-semibold">{entry.reactions[emoji] ?? 0}</span>
+                    </motion.button>
+                  ))}
+                </div>
+              </div>
+            </motion.div>
+          ))}
+        </div>
+      </section>
+    </div>
   )
 }
-
 
 function ProfileScreen({
   user,
@@ -3813,6 +3986,7 @@ function ProfileScreen({
   )
   const [unlockedBadge, setUnlockedBadge] = useState<AchievementKey | null>(null)
   const lastSyncLabel = useMemo(() => formatRelativeTimestamp(syncStatus.lastSyncedAt), [syncStatus.lastSyncedAt])
+  const [cleanupRunning, setCleanupRunning] = useState(false)
 
   const badgeMeta: Record<
     AchievementKey,
@@ -3849,6 +4023,24 @@ function ProfileScreen({
   }
 
   const closeModal = () => setUnlockedBadge(null)
+
+  const handleRunCleanup = async () => {
+    if (cleanupRunning) {
+      return
+    }
+    setCleanupRunning(true)
+    try {
+      const result = await runLocalDataCleanup()
+      const jobsLabel = `${result.jobsFixed} job${result.jobsFixed === 1 ? '' : 's'}`
+      const pendingLabel = `${result.pendingFixed} pending op${result.pendingFixed === 1 ? '' : 's'}`
+      showToast(`Cleanup complete: ${jobsLabel}, ${pendingLabel}.`, 'info')
+    } catch (error) {
+      console.error('Data cleanup failed', error)
+      showToast('Data cleanup failed. Check console for details.', 'error')
+    } finally {
+      setCleanupRunning(false)
+    }
+  }
 
   return (
     <div className="space-y-6 pb-24">
@@ -3954,6 +4146,15 @@ function ProfileScreen({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          {user.role === 'admin' && (
+            <Button
+              onClick={handleRunCleanup}
+              disabled={cleanupRunning}
+              className="inline-flex items-center gap-2 rounded-full border border-slate-600 bg-transparent px-5 py-2 text-sm font-semibold text-slate-200 transition hover:border-amber-400 hover:text-amber-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 disabled:opacity-60"
+            >
+              {cleanupRunning ? 'Cleaning…' : 'Run data cleanup'}
+            </Button>
+          )}
           <Button
             onClick={onSyncNow}
             disabled={syncStatus.status === 'pushing'}
@@ -4022,7 +4223,7 @@ function ProfileScreen({
   )
 }
 
-export default function SONLApp() {
+function AppShell() {
   const [user, setUser] = useState<User | null>(null)
   const [pin, setPin] = useState('')
 
@@ -4056,9 +4257,24 @@ export default function SONLApp() {
     void persistUser(null)
   }, [])
 
-  if (!user) {
-    return <LoginShell pin={pin} setPin={setPin} onLogin={handleLogin} />
-  }
-
-  return <AuthedShell user={user} onLogout={handleLogout} />
+  return (
+    <BrowserRouter>
+      {user ? (
+        <Routes>
+          <Route path="/crew/profiles" element={<Profiles />} />
+          <Route path="/crew/profiles/:userId" element={<ProfileDetail />} />
+          <Route path="/crew/leaderboards" element={<Leaderboards />} />
+          <Route path="/crew/awards" element={<Awards />} />
+          <Route path="*" element={<AuthedShell user={user} onLogout={handleLogout} />} />
+        </Routes>
+      ) : (
+        <LoginShell pin={pin} setPin={setPin} onLogin={handleLogin} />
+      )}
+    </BrowserRouter>
+  )
 }
+
+export default function SONLApp() {
+  return <AppShell />
+}
+

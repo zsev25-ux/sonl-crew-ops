@@ -1,5 +1,7 @@
 import Dexie, { type Table } from 'dexie'
 import { normalizeMaterials, type JobMaterials } from '@/lib/jobmeta'
+import { safePrepareJobForFirestore } from '@/lib/job-schema'
+import { safeSerialize } from '@/lib/sanitize'
 
 export type JobRecord = {
   id: number
@@ -74,17 +76,20 @@ export type AwardRecord = {
   updatedAt: number
 }
 
+export type MediaStatus = 'local' | 'queued' | 'uploading' | 'synced' | 'error'
+
 export type MediaRecord = {
   id: string
-  jobId: number
-  kind: 'image' | 'video'
-  mime?: string
-  localBlob?: Blob
-  localUrl?: string
-  remoteUrl?: string
-  thumbUrl?: string
-  width?: number
-  height?: number
+  jobId?: string
+  name: string
+  type: string
+  size: number
+  blob: Blob | null
+  localUrl?: string | null
+  remoteUrl?: string | null
+  remotePath?: string | null
+  status: MediaStatus
+  error?: string | null
   createdAt: number
   updatedAt: number
 }
@@ -287,17 +292,83 @@ const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
       })
     })
 
-  database.version(4).stores({
-    jobs: '&id,date,crew,updatedAt',
-    times: '&id,jobId,start,updatedAt,[jobId+start]',
-    policy: '&key',
-    state: '&key',
-    kudos: '&id,updatedAt',
-    users: '&id,updatedAt',
-    awards: '&id,userRefId,seasonId,updatedAt',
-    media: '&id,jobId,updatedAt',
-    pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
-  })
+  database.version(4)
+    .stores({
+      jobs: '&id,date,crew,updatedAt',
+      times: '&id,jobId,start,updatedAt,[jobId+start]',
+      policy: '&key',
+      state: '&key',
+      kudos: '&id,updatedAt',
+      users: '&id,updatedAt',
+      media: '&id,jobId,name,type,size,status,createdAt',
+      pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
+    })
+    .upgrade(async (transaction) => {
+      const mediaTable = transaction.table('media')
+      const legacyRecords = await mediaTable.toArray()
+      if (legacyRecords.length === 0) {
+        return
+      }
+
+      const now = Date.now()
+      await mediaTable.clear()
+      for (const legacy of legacyRecords) {
+        const blob =
+          legacy && 'blob' in legacy && legacy.blob instanceof Blob
+            ? (legacy.blob as Blob)
+            : legacy && 'localBlob' in legacy && legacy.localBlob instanceof Blob
+              ? (legacy.localBlob as Blob)
+              : null
+        const createdAt =
+          typeof legacy?.createdAt === 'number' ? (legacy.createdAt as number) : now
+        const id =
+          typeof legacy?.id === 'string' && legacy.id
+            ? (legacy.id as string)
+            : generateMediaId()
+        const record: MediaRecord = {
+          id,
+          jobId:
+            typeof legacy?.jobId === 'number'
+              ? String(legacy.jobId)
+              : typeof legacy?.jobId === 'string'
+                ? (legacy.jobId as string)
+                : undefined,
+          name:
+            typeof legacy?.name === 'string' && legacy.name
+              ? (legacy.name as string)
+              : id,
+          type:
+            typeof legacy?.type === 'string' && legacy.type
+              ? (legacy.type as string)
+              : typeof legacy?.mime === 'string' && legacy.mime
+                ? (legacy.mime as string)
+                : blob
+                  ? blob.type || 'application/octet-stream'
+                  : 'application/octet-stream',
+          size:
+            typeof legacy?.size === 'number'
+              ? (legacy.size as number)
+              : blob
+                ? blob.size
+                : 0,
+          blob,
+          localUrl:
+            typeof legacy?.localUrl === 'string' ? (legacy.localUrl as string) : null,
+          remoteUrl:
+            typeof legacy?.remoteUrl === 'string' ? (legacy.remoteUrl as string) : null,
+          remotePath: null,
+          status:
+            typeof legacy?.remoteUrl === 'string' && legacy.remoteUrl
+              ? 'synced'
+              : 'local',
+          error: null,
+          createdAt,
+          updatedAt: now,
+        }
+
+        await mediaTable.put(record)
+      }
+    })
 
   return database
 }
@@ -412,4 +483,53 @@ export async function updatePendingOp(
   changes: Partial<PendingOpRecord>,
 ): Promise<void> {
   await db.pendingOps.update(id, { ...changes, updatedAt: Date.now() })
+}
+
+export type MediaRow = MediaRecord
+
+export const generateMediaId = (): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+export async function addLocalMedia(file: File, jobId?: string): Promise<string> {
+  const timestamp = Date.now()
+  const record: MediaRecord = {
+    id: generateMediaId(),
+    jobId,
+    name: file.name,
+    type: file.type || 'application/octet-stream',
+    size: file.size,
+    blob: file,
+    localUrl: null,
+    remoteUrl: null,
+    remotePath: null,
+    status: 'local',
+    error: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }
+  await db.media.add(record)
+  return record.id
+}
+
+export async function setMediaStatus(
+  id: string,
+  status: MediaStatus,
+  patch: Partial<MediaRecord> = {},
+): Promise<void> {
+  await db.media.update(id, {
+    ...patch,
+    status,
+    updatedAt: Date.now(),
+  })
+}
+
+export async function getUnsyncedMedia(): Promise<MediaRow[]> {
+  return db.media
+    .where('status')
+    .notEqual('synced')
+    .toArray()
 }
