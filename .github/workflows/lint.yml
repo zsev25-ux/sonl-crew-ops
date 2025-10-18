@@ -26,7 +26,7 @@ jobs:
 
       - name: Run ESLint
         run: pnpm lint
-        continue-on-error: true
+        continue-on-error: true # Temporarily allow failures until lint violations are resolved
 
       - name: Run Prettier check
         run: pnpm prettier:check
