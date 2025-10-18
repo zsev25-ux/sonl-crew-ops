@@ -8,7 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Route, Routes, useOutlet } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -2248,6 +2248,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   }
 
   const stripesStyleElement = <style>{stripesStyles}</style>
+  const outlet = useOutlet()
   const routeProgress = useMemo(() => {
     const maxJobs = policy.maxJobsPerDay || defaultPolicy.maxJobsPerDay
     if (!maxJobs || maxJobs <= 0) {
@@ -2276,6 +2277,23 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     },
     [setBoardTab, setView],
   )
+
+  if (outlet) {
+    return (
+      <>
+        <LayerHost />
+        <div className="min-h-screen w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
+          {stripesStyleElement}
+          <main
+            className="relative z-10 pt-16 pb-32 sm:pb-36"
+            style={{ paddingBottom: 'calc(120px + env(safe-area-inset-bottom, 0px))' }}
+          >
+            <div className="mx-auto w-full max-w-7xl px-4">{outlet}</div>
+          </main>
+        </div>
+      </>
+    )
+  }
 
   return (
     <>
@@ -4435,11 +4453,12 @@ export default function SONLApp() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/crew/profiles" element={<Profiles />} />
-        <Route path="/crew/profiles/:userId" element={<ProfileDetail />} />
-        <Route path="/crew/leaderboards" element={<Leaderboards />} />
-        <Route path="/crew/awards" element={<Awards />} />
-        <Route path="*" element={<AppShell />} />
+        <Route path="/*" element={<AppShell />}>
+          <Route path="crew/profiles" element={<Profiles />} />
+          <Route path="crew/profiles/:userId" element={<ProfileDetail />} />
+          <Route path="crew/leaderboards" element={<Leaderboards />} />
+          <Route path="crew/awards" element={<Awards />} />
+        </Route>
       </Routes>
     </BrowserRouter>
   )
