@@ -8,6 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react'
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -68,6 +69,10 @@ import {
 } from '@/lib/app-data'
 import { db } from '@/lib/db'
 import type { CrewOption, Job, JobCore, Policy, Role, User } from '@/lib/types'
+import Profiles from './pages/crew/Profiles'
+import ProfileDetail from './pages/crew/ProfileDetail'
+import Leaderboards from './pages/crew/Leaderboards'
+import Awards from './pages/crew/Awards'
 
 const LOGIN_BG = '/FINEASFLOADINGSCREEN.jpg' // place the file in /public
 
@@ -4385,7 +4390,7 @@ function ProfileScreen({
   )
 }
 
-export default function SONLApp() {
+function AppShell() {
   const [user, setUser] = useState<User | null>(null)
   const [pin, setPin] = useState('')
 
@@ -4424,4 +4429,18 @@ export default function SONLApp() {
   }
 
   return <AuthedShell user={user} onLogout={handleLogout} />
+}
+
+export default function SONLApp() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/crew/profiles" element={<Profiles />} />
+        <Route path="/crew/profiles/:userId" element={<ProfileDetail />} />
+        <Route path="/crew/leaderboards" element={<Leaderboards />} />
+        <Route path="/crew/awards" element={<Awards />} />
+        <Route path="*" element={<AppShell />} />
+      </Routes>
+    </BrowserRouter>
+  )
 }
