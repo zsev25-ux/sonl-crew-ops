@@ -4435,10 +4435,12 @@ export default function SONLApp() {
   return (
     <BrowserRouter>
       <Routes>
+        // === SONL CREW ROUTES START ===
         <Route path="/crew/profiles" element={<Profiles />} />
         <Route path="/crew/profiles/:userId" element={<ProfileDetail />} />
         <Route path="/crew/leaderboards" element={<Leaderboards />} />
         <Route path="/crew/awards" element={<Awards />} />
+        // === SONL CREW ROUTES END ===
         <Route path="*" element={<AppShell />} />
       </Routes>
     </BrowserRouter>
