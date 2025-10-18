@@ -40,3 +40,7 @@ dev-dist/
 /dev-dist/
 # ts incremental
 *.tsbuildinfo
+
+# build caches
+*.tsbuildinfo
+/dev-dist/
