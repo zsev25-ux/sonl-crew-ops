@@ -35,17 +35,27 @@ const toJobId = (jobId?: string): string | undefined =>
   typeof jobId === 'string' && jobId.length > 0 ? jobId : undefined
 
 const mapRecordToMedia = async (record: MediaRow): Promise<JobMedia> => {
-  let localUrl = typeof record.localUrl === 'string' ? record.localUrl : undefined
+  let localUrl: string | undefined
+
   if (record.blob instanceof Blob && isBrowser) {
-    if (localUrl) {
+    const cachedUrl = typeof record.localUrl === 'string' ? record.localUrl : undefined
+    if (cachedUrl) {
       try {
-        URL.revokeObjectURL(localUrl)
+        URL.revokeObjectURL(cachedUrl)
       } catch (error) {
         console.warn('Failed to revoke cached media URL', error)
       }
     }
+
     localUrl = URL.createObjectURL(record.blob)
     await db.media.update(record.id, { localUrl })
+  } else if (typeof record.localUrl === 'string' && isBrowser) {
+    try {
+      URL.revokeObjectURL(record.localUrl)
+    } catch (error) {
+      console.warn('Failed to revoke stale media URL', error)
+    }
+    await db.media.update(record.id, { localUrl: null })
   }
 
   const previewUrl = localUrl ?? (record.remoteUrl ?? undefined)
