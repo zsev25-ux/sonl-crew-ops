@@ -263,10 +263,12 @@ const writeRemoteJobsToDexie = async (
   for (const docSnap of docs) {
     const data = docSnap.data() as Record<string, unknown>
     const docPath = `jobs/${docSnap.id}`
-    const prepared = safePrepareJobForFirestore(
-      { ...data, id: data.id ?? docSnap.id },
-      { docPath },
-    )
+    const normalizedData: Record<string, unknown> = { ...data, id: data.id ?? docSnap.id }
+    const rawUpdatedAt = data.updatedAt
+    if (rawUpdatedAt && typeof rawUpdatedAt === 'object' && 'toMillis' in (rawUpdatedAt as Timestamp)) {
+      normalizedData.updatedAt = (rawUpdatedAt as Timestamp).toMillis()
+    }
+    const prepared = safePrepareJobForFirestore(normalizedData, { docPath })
 
     if (!prepared.success) {
       console.error('[sync] skipped remote job', docPath, prepared.error.issues)
