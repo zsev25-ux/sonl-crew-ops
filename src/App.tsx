@@ -863,6 +863,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const previousJobIdRef = useRef<number | null>(null)
   const notesPrevValueRef = useRef<string | undefined>(undefined)
   const crewNotesAutoSaveTimeoutRef = useRef<number | null>(null)
+  const outlet = useOutlet()
 
   const [mediaItems, setMediaItems] = useState<JobMedia[]>([])
   const [mediaLoading, setMediaLoading] = useState(false)
