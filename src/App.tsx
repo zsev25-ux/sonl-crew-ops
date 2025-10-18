@@ -767,7 +767,15 @@ function validateNewJob(
   return null
 }
 
-function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
+function AuthedShell({
+  user,
+  onLogout,
+  children,
+}: {
+  user: User
+  onLogout: () => void
+  children?: React.ReactNode
+}) {
   const sanitizedInitialJobs = useMemo(
     () => sanitizeJobs(initialJobs, initialJobs),
     [],
@@ -4411,6 +4419,7 @@ function ProfileScreen({
 function AppShell() {
   const [user, setUser] = useState<User | null>(null)
   const [pin, setPin] = useState('')
+  const outlet = useOutlet()
 
   useEffect(() => {
     let cancelled = false
@@ -4446,7 +4455,11 @@ function AppShell() {
     return <LoginShell pin={pin} setPin={setPin} onLogin={handleLogin} />
   }
 
-  return <AuthedShell user={user} onLogout={handleLogout} />
+  return (
+    <AuthedShell user={user} onLogout={handleLogout}>
+      {outlet}
+    </AuthedShell>
+  )
 }
 
 export default function SONLApp() {
