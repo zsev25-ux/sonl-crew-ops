@@ -814,6 +814,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [jobMetaDraft, setJobMetaDraft] = useState<JobMeta>(() =>
     createDefaultJobMeta(),
   )
+  const latestJobMetaDraftRef = useRef(jobMetaDraft)
   const [materialInputs, setMaterialInputs] = useState<MaterialsInputState>(
     DEFAULT_MATERIAL_INPUTS,
   )
@@ -1755,6 +1756,10 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   }, [activeJob])
 
   useEffect(() => {
+    latestJobMetaDraftRef.current = jobMetaDraft
+  }, [jobMetaDraft])
+
+  useEffect(() => {
     if (!activeJob) {
       setCrewNotesSaving(false)
       return
@@ -1778,7 +1783,12 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
 
     setCrewNotesSaving(true)
     crewNotesAutoSaveTimeoutRef.current = window.setTimeout(() => {
-      persistMetaForJob(activeJob.id, { ...jobMetaDraft, crewNotes: currentNotes }, { silent: true })
+      const baseMeta = latestJobMetaDraftRef.current
+      persistMetaForJob(
+        activeJob.id,
+        { ...baseMeta, crewNotes: currentNotes },
+        { silent: true },
+      )
       setCrewNotesSaving(false)
       setMetaStatusMessage('Notes autosaved')
       notesPrevValueRef.current = currentNotes
@@ -1791,7 +1801,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         crewNotesAutoSaveTimeoutRef.current = null
       }
     }
-  }, [activeJob, jobMetaDraft, persistMetaForJob])
+  }, [activeJob, jobMetaDraft.crewNotes, persistMetaForJob])
 
   useEffect(() => {
     return () => {
