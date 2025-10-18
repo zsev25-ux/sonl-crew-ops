@@ -345,6 +345,7 @@ const writeRemoteJobsToDexie = async (
     const prepared = safePrepareJobForFirestore(normalizedData, { docPath })
 
     if (!prepared.success) {
+      const failure = prepared as { success: false; error: JobValidationError }
       const fieldTypes = timeFields.reduce<Record<string, string>>((acc, field) => {
         const value = normalizedData[field]
         acc[field] = value === null ? 'null' : typeof value
@@ -352,7 +353,7 @@ const writeRemoteJobsToDexie = async (
       }, {})
       console.error(`[sync] skipped remote job ${docPath}`, {
         fieldTypes,
-        issues: prepared.error.issues,
+        issues: failure.error.issues,
       })
       continue
     }
@@ -379,6 +380,7 @@ const writeRemoteJobsToDexie = async (
     }
 
     entries.push({ job, updatedAt })
+    continue
   }
 
   await db.transaction('rw', db.jobs, async () => {
@@ -912,7 +914,8 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
         const docPath = `jobs/${op.job.id}`
         const prepared = safePrepareJobForFirestore(op.job, { docPath })
         if (!prepared.success) {
-          handleValidationFailure(prepared.error, docPath)
+          const failure = prepared as { success: false; error: JobValidationError }
+          handleValidationFailure(failure.error, docPath)
           return
         }
         const { data, warnings, report } = prepared.result

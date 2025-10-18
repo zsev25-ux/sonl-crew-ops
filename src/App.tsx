@@ -8,7 +8,8 @@ import React, {
   useRef,
   useState,
 } from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Route, Routes, useOutlet } from 'react-router-dom'
+import BottomNav from './components/BottomNav'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -28,7 +29,7 @@ import {
   revokeMediaUrls,
   syncRemoteMedia,
   type JobMedia,
-} from '@/lib/media'
+} from '@/lib/media';
 import {
   createDefaultJobMeta,
   loadMeta,
