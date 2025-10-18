@@ -78,17 +78,20 @@ const toJobMedia = (
   const { createPreview = true } = options
   const mime = record.type ?? 'application/octet-stream'
   const kind = determineKind(mime, record.kind)
+  const shouldPreferLocal =
+    !record.remoteUrl ||
+    (typeof navigator !== 'undefined' && navigator.onLine === false)
   let localUrl: string | undefined
-  if (
+  const canCreateLocalUrl =
     createPreview &&
-    !record.remoteUrl &&
     record.blob instanceof Blob &&
     isBrowser &&
-    hasObjectUrl
-  ) {
+    hasObjectUrl &&
+    (shouldPreferLocal || !record.remoteUrl)
+  if (canCreateLocalUrl) {
     localUrl = URL.createObjectURL(record.blob)
   }
-  const src = record.remoteUrl ?? localUrl ?? ''
+  const src = shouldPreferLocal && localUrl ? localUrl : record.remoteUrl ?? localUrl ?? ''
   const thumb = kind === 'image' ? record.thumbUrl ?? src : undefined
 
   return {
