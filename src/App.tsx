@@ -1,13 +1,11 @@
 import React, {
-  type ChangeEvent,
-  type FormEvent,
-  type RefObject,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from 'react'
+import type { ChangeEvent, FormEvent, RefObject } from 'react'
 import { BrowserRouter, Route, Routes, useOutlet } from 'react-router-dom'
 import BottomNav from './components/BottomNav'
 import { Button } from '@/components/ui/button'
@@ -22,6 +20,14 @@ import {
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { loadClientsFromFile, loadClientsFromPublic, type Client } from '@/lib/clients'
+
+// === SONL CREW IMPORTS ===
+import Profiles from './pages/crew/Profiles'
+import ProfileDetail from './pages/crew/ProfileDetail'
+import Leaderboards from './pages/crew/Leaderboards'
+import Awards from './pages/crew/Awards'
+// === END SONL CREW IMPORTS ===
+
 import {
   addLocalMedia,
   deleteMedia,
@@ -29,7 +35,7 @@ import {
   revokeMediaUrls,
   syncRemoteMedia,
   type JobMedia,
-} from '@/lib/media';
+} from '@/lib/media'
 import {
   createDefaultJobMeta,
   loadMeta,
@@ -60,8 +66,7 @@ import {
   Users,
   type LucideIcon,
 } from 'lucide-react'
-
-import ReactDOM from "react-dom"
+import ReactDOM from 'react-dom'
 import {
   bootstrapAppData,
   persistActiveDate,
@@ -72,10 +77,6 @@ import {
 } from '@/lib/app-data'
 import { db } from '@/lib/db'
 import type { CrewOption, Job, JobCore, Policy, Role, User } from '@/lib/types'
-import Profiles from './pages/crew/Profiles'
-import ProfileDetail from './pages/crew/ProfileDetail'
-import Leaderboards from './pages/crew/Leaderboards'
-import Awards from './pages/crew/Awards'
 
 const LOGIN_BG = '/FINEASFLOADINGSCREEN.jpg' // place the file in /public
 
