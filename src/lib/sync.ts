@@ -692,10 +692,10 @@ const performUserAvatarUpload = async (
   const blob = await dataUrlToBlob(dataUrl, contentType)
   const path = `avatars/${userId}/${opId}.jpg`
   const ref = storageRef(cloudStorage, path)
-  await uploadBytes(ref, blob, {
+  const snapshot = await uploadBytes(ref, blob, {
     contentType: contentType ?? blob.type ?? 'image/jpeg',
   })
-  const url = await getDownloadURL(ref)
+  const url = await getDownloadURL(snapshot.ref)
   await setDoc(
     doc(cloudDb, 'users', userId),
     {
