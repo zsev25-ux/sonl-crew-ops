@@ -81,6 +81,36 @@ const seedJobs = [
   },
 ]
 
+const sanitizeValue = (value) => {
+  if (value === undefined) {
+    return undefined
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => sanitizeValue(entry))
+      .filter((entry) => entry !== undefined)
+  }
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    const result = {}
+    for (const [key, entry] of Object.entries(value)) {
+      const sanitized = sanitizeValue(entry)
+      if (sanitized !== undefined) {
+        result[key] = sanitized
+      }
+    }
+    return result
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+  if (typeof value === 'string') {
+    return value.trim()
+  }
+  return value
+}
+
+const sanitizeForFirestore = (value) => sanitizeValue(value)
+
 async function main() {
   console.info('Seed starting…')
   const app = initializeApp(firebaseConfig)
@@ -89,7 +119,7 @@ async function main() {
   await setDoc(
     doc(firestore, 'config', 'policy'),
     {
-      ...seedPolicy,
+      ...sanitizeForFirestore(seedPolicy),
       updatedAt: serverTimestamp(),
     },
     { merge: true },
@@ -100,7 +130,7 @@ async function main() {
     await setDoc(
       doc(firestore, 'jobs', String(job.id)),
       {
-        ...job,
+        ...sanitizeForFirestore(job),
         updatedAt: serverTimestamp(),
       },
       { merge: true },
