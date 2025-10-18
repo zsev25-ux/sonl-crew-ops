@@ -1759,21 +1759,22 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     latestJobMetaDraftRef.current = jobMetaDraft
   }, [jobMetaDraft])
 
+  const activeJobId = activeJob?.id ?? null
+  const crewNotesDraft = jobMetaDraft.crewNotes ?? ''
+
   useEffect(() => {
-    if (!activeJob) {
+    if (activeJobId === null) {
       setCrewNotesSaving(false)
       return
     }
 
-    if (previousJobIdRef.current !== activeJob.id) {
-      previousJobIdRef.current = activeJob.id
-      notesPrevValueRef.current = jobMetaDraft.crewNotes
+    if (previousJobIdRef.current !== activeJobId) {
+      previousJobIdRef.current = activeJobId
+      notesPrevValueRef.current = crewNotesDraft
       return
     }
 
-    const currentNotes = jobMetaDraft.crewNotes ?? ''
-
-    if ((notesPrevValueRef.current ?? '') === currentNotes) {
+    if ((notesPrevValueRef.current ?? '') === crewNotesDraft) {
       return
     }
 
@@ -1785,13 +1786,13 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     crewNotesAutoSaveTimeoutRef.current = window.setTimeout(() => {
       const baseMeta = latestJobMetaDraftRef.current
       persistMetaForJob(
-        activeJob.id,
-        { ...baseMeta, crewNotes: currentNotes },
+        activeJobId,
+        { ...baseMeta, crewNotes: crewNotesDraft },
         { silent: true },
       )
       setCrewNotesSaving(false)
       setMetaStatusMessage('Notes autosaved')
-      notesPrevValueRef.current = currentNotes
+      notesPrevValueRef.current = crewNotesDraft
       crewNotesAutoSaveTimeoutRef.current = null
     }, 800)
 
@@ -1801,7 +1802,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
         crewNotesAutoSaveTimeoutRef.current = null
       }
     }
-  }, [activeJob, jobMetaDraft.crewNotes, persistMetaForJob])
+  }, [activeJobId, crewNotesDraft, persistMetaForJob])
 
   useEffect(() => {
     return () => {
