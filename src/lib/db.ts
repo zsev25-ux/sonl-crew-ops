@@ -1,5 +1,7 @@
 import Dexie, { type Table } from 'dexie'
 import { normalizeMaterials, type JobMaterials } from '@/lib/jobmeta'
+import { safePrepareJobForFirestore } from '@/lib/job-schema'
+import { safeSerialize } from '@/lib/sanitize'
 
 export type JobRecord = {
   id: number
