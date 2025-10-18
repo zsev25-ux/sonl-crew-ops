@@ -1,0 +1,56 @@
+name: Firestore Nightly Backup
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Export Firestore
+        id: export
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          EXPORT_PREFIX="gs://${PROJECT_ID}-backups/firestore-${TIMESTAMP}"
+          echo "Exporting Firestore to ${EXPORT_PREFIX}"
+          gcloud firestore export "${EXPORT_PREFIX}"
+          MANIFEST_PATH="manifest-${TIMESTAMP}.json"
+          cat <<JSON > "${MANIFEST_PATH}"
+          {
+            "project": "${PROJECT_ID}",
+            "bucket": "${PROJECT_ID}-backups",
+            "prefix": "firestore-${TIMESTAMP}",
+            "exportUri": "${EXPORT_PREFIX}"
+          }
+          JSON
+          echo "manifest=${MANIFEST_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firestore-backup-manifest
+          path: ${{ steps.export.outputs.manifest }}
+          retention-days: 14
