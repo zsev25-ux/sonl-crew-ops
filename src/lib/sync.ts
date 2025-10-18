@@ -40,7 +40,6 @@ import {
   type DocumentData,
   type DocumentSnapshot,
   type QueryDocumentSnapshot,
-  type Timestamp,
   type Unsubscribe,
 } from 'firebase/firestore'
 import {
@@ -123,6 +122,75 @@ const getOnlineStatus = (): boolean => {
     return true
   }
   return navigator.onLine
+}
+
+const hasToMillis = (value: unknown): value is { toMillis: () => number } =>
+  typeof value === 'object' && value !== null && typeof (value as { toMillis?: unknown }).toMillis === 'function'
+
+const toMillisAny = (value: unknown): number | undefined => {
+  if (value == null) {
+    return undefined
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined
+  }
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  if (value instanceof Date) {
+    return value.getTime()
+  }
+  if (hasToMillis(value)) {
+    try {
+      const millis = value.toMillis()
+      return Number.isFinite(millis) ? millis : undefined
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (value === null || typeof value !== 'object') {
+    return false
+  }
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+const stripUndefinedDeep = <T>(obj: T): T => {
+  if (obj === null || typeof obj !== 'object') {
+    return obj
+  }
+
+  if (Array.isArray(obj)) {
+    const cleaned: unknown[] = []
+    for (const item of obj) {
+      const sanitized = stripUndefinedDeep(item)
+      if (sanitized !== undefined) {
+        cleaned.push(sanitized)
+      }
+    }
+    return cleaned as unknown as T
+  }
+
+  if (!isPlainObject(obj)) {
+    return obj
+  }
+
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === undefined) {
+      continue
+    }
+    const sanitized = stripUndefinedDeep(value)
+    if (sanitized !== undefined) {
+      result[key] = sanitized
+    }
+  }
+  return result as T
 }
 
 const recordLastSync = async (timestamp: number) => {
@@ -245,15 +313,7 @@ const scheduleWorker = async (): Promise<void> => {
   }, Math.min(delay, MAX_RETRY_DELAY))
 }
 
-const toMillis = (value: unknown): number => {
-  if (typeof value === 'number') {
-    return value
-  }
-  if (value && typeof value === 'object' && 'toMillis' in (value as Timestamp)) {
-    return (value as Timestamp).toMillis()
-  }
-  return Date.now()
-}
+const toMillis = (value: unknown): number => toMillisAny(value) ?? Date.now()
 
 const writeRemoteJobsToDexie = async (
   docs: QueryDocumentSnapshot<DocumentData>[],
@@ -264,19 +324,40 @@ const writeRemoteJobsToDexie = async (
     const data = docSnap.data() as Record<string, unknown>
     const docPath = `jobs/${docSnap.id}`
     const normalizedData: Record<string, unknown> = { ...data, id: data.id ?? docSnap.id }
-    const rawUpdatedAt = data.updatedAt
-    if (rawUpdatedAt && typeof rawUpdatedAt === 'object' && 'toMillis' in (rawUpdatedAt as Timestamp)) {
-      normalizedData.updatedAt = (rawUpdatedAt as Timestamp).toMillis()
+
+    const timeFields: Array<'updatedAt' | 'createdAt' | 'completedAt'> = [
+      'updatedAt',
+      'createdAt',
+      'completedAt',
+    ]
+
+    for (const field of timeFields) {
+      const rawValue = data[field]
+      const millis = toMillisAny(rawValue)
+      if (millis !== undefined) {
+        if (hasToMillis(rawValue) && process.env.NODE_ENV === 'development') {
+          console.info(`[sync] normalized Firestore Timestamp in ${docPath} ${field}`)
+        }
+        normalizedData[field] = millis
+      }
     }
     const prepared = safePrepareJobForFirestore(normalizedData, { docPath })
 
     if (!prepared.success) {
-      console.error('[sync] skipped remote job', docPath, prepared.error.issues)
+      const fieldTypes = timeFields.reduce<Record<string, string>>((acc, field) => {
+        const value = normalizedData[field]
+        acc[field] = value === null ? 'null' : typeof value
+        return acc
+      }, {})
+      console.error(`[sync] skipped remote job ${docPath}`, {
+        fieldTypes,
+        issues: prepared.error.issues,
+      })
       continue
     }
 
     const { data: sanitized, warnings } = prepared.result
-    const updatedAt = toMillis(data.updatedAt)
+    const updatedAt = toMillis(normalizedData.updatedAt)
     logSchemaWarnings(docPath, warnings)
 
     const job: Job = {
@@ -565,16 +646,14 @@ const performJobWrite = async (rawJob: unknown, opId: string) => {
     notifySanitizedDoc(docPath, report)
   }
 
-  await setDoc(
-    doc(cloudDb, 'jobs', String(job.id)),
-    {
-      ...job,
-      bothCrews: job.crew === 'Both Crews',
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
+  const payload = stripUndefinedDeep({
+    ...job,
+    bothCrews: job.crew === 'Both Crews',
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+  })
+
+  await setDoc(doc(cloudDb, 'jobs', String(job.id)), payload, { merge: true })
 }
 
 const performJobDelete = async (jobId: number) => {
@@ -590,15 +669,13 @@ const performPolicyUpdate = async (policy: Policy, opId: string) => {
   }
   const docPath = 'config/policy'
   const clean = safeSerialize(stripUndefined(policy), { docPath })
-  await setDoc(
-    doc(cloudDb, 'config', 'policy'),
-    {
-      ...clean,
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
+  const payload = stripUndefinedDeep({
+    ...clean,
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+  })
+
+  await setDoc(doc(cloudDb, 'config', 'policy'), payload, { merge: true })
 }
 
 const performKudosReact = async (
@@ -611,16 +688,14 @@ const performKudosReact = async (
     return
   }
   const actor = typeof by === 'string' ? by.trim() || 'Crew' : 'Crew'
-  await setDoc(
-    doc(cloudDb, 'kudos', kudosId),
-    {
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-      lastActor: actor,
-      [`reactions.${emoji}`]: increment(1),
-    },
-    { merge: true },
-  )
+  const payload = stripUndefinedDeep({
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+    lastActor: actor,
+    [`reactions.${emoji}`]: increment(1),
+  })
+
+  await setDoc(doc(cloudDb, 'kudos', kudosId), payload, { merge: true })
 }
 
 const performMediaUpload = async (
@@ -674,11 +749,11 @@ const performMediaUpload = async (
     { docPath: `jobs/${jobId}/media/${mediaId}` },
   )
 
-  await setDoc(
-    doc(cloudDb, 'jobs', String(jobId), 'media', mediaId),
-    cleanRemoteMedia,
-    { merge: true },
-  )
+  const payload = stripUndefinedDeep(cleanRemoteMedia)
+
+  await setDoc(doc(cloudDb, 'jobs', String(jobId), 'media', mediaId), payload, {
+    merge: true,
+  })
   await db.media.update(mediaId, {
     remoteUrl,
     localBlob: undefined,
