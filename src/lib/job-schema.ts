@@ -7,6 +7,9 @@ export type JobSchemaContext = {
   warnings: string[]
 }
 
+const hasToMillis = (value: unknown): value is { toMillis: () => number } =>
+  typeof value === 'object' && value !== null && typeof (value as { toMillis?: unknown }).toMillis === 'function'
+
 const RawJobSchema = z
   .object({
     id: z.union([z.number(), z.string()]),
@@ -60,7 +63,7 @@ const RawJobSchema = z
       .optional(),
     vip: z.union([z.boolean(), z.number(), z.string()]).optional(),
     bothCrews: z.union([z.boolean(), z.number(), z.string()]).optional(),
-    updatedAt: z.union([z.number(), z.string(), z.date()]).optional(),
+    updatedAt: z.union([z.number(), z.string(), z.date(), z.custom(hasToMillis)]).optional(),
     meta: z.unknown().optional(),
   })
   .passthrough()
@@ -189,10 +192,32 @@ export const JobSchema = RawJobSchema.transform((raw, ctx) => {
   const lifetimeSpend = toOptionalNumber(raw.lifetimeSpend, warn, 'lifetimeSpend')
   const vip = toBoolean(raw.vip)
   const bothCrews = crew === 'Both Crews' || toBoolean(raw.bothCrews)
-  const updatedAt =
-    typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
-      ? raw.updatedAt
-      : undefined
+  const updatedAtValue = (() => {
+    if (raw.updatedAt == null) {
+      return undefined
+    }
+    if (typeof raw.updatedAt === 'number') {
+      return Number.isFinite(raw.updatedAt) ? raw.updatedAt : undefined
+    }
+    if (typeof raw.updatedAt === 'string') {
+      const parsed = Date.parse(raw.updatedAt)
+      return Number.isFinite(parsed) ? parsed : undefined
+    }
+    if (raw.updatedAt instanceof Date) {
+      return Number.isFinite(raw.updatedAt.getTime()) ? raw.updatedAt.getTime() : undefined
+    }
+    if (hasToMillis(raw.updatedAt)) {
+      try {
+        const millis = raw.updatedAt.toMillis()
+        return Number.isFinite(millis) ? millis : undefined
+      } catch {
+        return undefined
+      }
+    }
+    return undefined
+  })()
+
+  const updatedAt = updatedAtValue
 
   const normalizedMeta = raw.meta
     ? normalizeJobMeta(raw.meta as Job['meta'] | undefined)
