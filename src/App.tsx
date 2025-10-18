@@ -8,7 +8,14 @@ import React, {
   useRef,
   useState,
 } from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import {
+  BrowserRouter,
+  Link,
+  Route,
+  Routes,
+  useMatch,
+  useOutlet,
+} from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -767,7 +774,15 @@ function validateNewJob(
   return null
 }
 
-function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
+function AuthedShell({
+  user,
+  onLogout,
+  children,
+}: {
+  user: User
+  onLogout: () => void
+  children?: React.ReactNode
+}) {
   const sanitizedInitialJobs = useMemo(
     () => sanitizeJobs(initialJobs, initialJobs),
     [],
@@ -2248,6 +2263,8 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   }
 
   const stripesStyleElement = <style>{stripesStyles}</style>
+  const crewRouteMatch = useMatch('/crew/*')
+  const crewContent = crewRouteMatch ? children : null
   const routeProgress = useMemo(() => {
     const maxJobs = policy.maxJobsPerDay || defaultPolicy.maxJobsPerDay
     if (!maxJobs || maxJobs <= 0) {
@@ -2276,6 +2293,77 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     },
     [setBoardTab, setView],
   )
+
+  if (crewContent) {
+    return (
+      <>
+        <LayerHost />
+        <div className="min-h-screen w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
+          {stripesStyleElement}
+          <div
+            aria-hidden
+            className="pointer-events-none fixed inset-x-0 top-0 z-20 h-32 bg-gradient-to-b from-slate-950/90 via-slate-950/40 to-transparent"
+          />
+          <main
+            className="relative z-10 pt-16 pb-24 sm:pb-28"
+            style={{ paddingBottom: 'calc(96px + env(safe-area-inset-bottom, 0px))' }}
+          >
+            <div className="mx-auto w-full max-w-5xl px-4">
+              <div className="space-y-6">
+                <motion.div
+                  initial={{ opacity: 0, y: -12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className="flex flex-col gap-4 rounded-3xl border border-amber-400/20 bg-slate-950/50 p-6 shadow-[0_18px_55px_rgba(7,10,20,0.55)] backdrop-blur-xl md:flex-row md:items-center md:justify-between"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-500/15 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.35em] text-amber-200">
+                      SONL
+                    </span>
+                    <div>
+                      <p className="text-sm font-semibold text-white">{user.name}</p>
+                      <p className="text-xs text-amber-200/80">
+                        {user.role === 'admin' ? 'Admin access' : 'Crew access'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="text-xs text-slate-300 md:text-right space-y-1">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400">
+                      Sync {syncStatus.status}
+                      {syncStatus.queued > 0 ? ` · ${syncStatus.queued} queued` : ''}
+                      {syncStatus.lastError ? ' · error' : ''}
+                    </p>
+                    <p className="text-[11px] text-slate-300/80">Last sync: {lastSyncLabel}</p>
+                    {syncStatus.lastError && (
+                      <p className="text-[11px] text-rose-300">Sync issue: {syncStatus.lastError}</p>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Link
+                      to="/"
+                      className="inline-flex items-center gap-2 rounded-full border border-amber-400/40 bg-transparent px-4 py-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/10"
+                    >
+                      Back to ops board
+                    </Link>
+                    <Button
+                      onClick={onLogout}
+                      className="inline-flex items-center gap-2 rounded-full bg-amber-500 px-4 py-2 text-xs font-semibold text-slate-900 transition hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+                    >
+                      <LogOut className="h-4 w-4" />
+                      Logout
+                    </Button>
+                  </div>
+                </motion.div>
+                <div className={`rounded-2xl ${THEME.panel} p-0 sm:p-2`}>
+                  {crewContent}
+                </div>
+              </div>
+            </div>
+          </main>
+        </div>
+      </>
+    )
+  }
 
   return (
     <>
@@ -4393,6 +4481,7 @@ function ProfileScreen({
 function AppShell() {
   const [user, setUser] = useState<User | null>(null)
   const [pin, setPin] = useState('')
+  const outlet = useOutlet()
 
   useEffect(() => {
     let cancelled = false
@@ -4428,18 +4517,23 @@ function AppShell() {
     return <LoginShell pin={pin} setPin={setPin} onLogin={handleLogin} />
   }
 
-  return <AuthedShell user={user} onLogout={handleLogout} />
+  return (
+    <AuthedShell user={user} onLogout={handleLogout}>
+      {outlet}
+    </AuthedShell>
+  )
 }
 
 export default function SONLApp() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/crew/profiles" element={<Profiles />} />
-        <Route path="/crew/profiles/:userId" element={<ProfileDetail />} />
-        <Route path="/crew/leaderboards" element={<Leaderboards />} />
-        <Route path="/crew/awards" element={<Awards />} />
-        <Route path="*" element={<AppShell />} />
+        <Route path="/*" element={<AppShell />}>
+          <Route path="crew/profiles" element={<Profiles />} />
+          <Route path="crew/profiles/:userId" element={<ProfileDetail />} />
+          <Route path="crew/leaderboards" element={<Leaderboards />} />
+          <Route path="crew/awards" element={<Awards />} />
+        </Route>
       </Routes>
     </BrowserRouter>
   )
