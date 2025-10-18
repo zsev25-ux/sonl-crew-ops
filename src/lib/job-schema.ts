@@ -148,7 +148,7 @@ const toBoolean = (value: unknown): boolean => {
 }
 
 export const JobSchema = RawJobSchema.transform((raw, ctx) => {
-  const context = (ctx.context as JobSchemaContext | undefined) ?? { warnings: [] }
+  const context = ((ctx as unknown as { context?: JobSchemaContext }).context ?? { warnings: [] })
   const warn = (message: string) => {
     context.warnings.push(message)
   }
@@ -276,7 +276,7 @@ export const prepareJobForFirestore = (
 ): JobSanitizationResult => {
   const warnings: string[] = []
   try {
-    const parsed = JobSchema.parse(input, { context: { warnings } as JobSchemaContext })
+    const parsed = JobSchema.parse(input, { context: { warnings } as JobSchemaContext } as unknown)
     let report: SanitizationReport = { removedPaths: [], trimmedPaths: [], replacedNumericPaths: [], coercedValues: [] }
     const sanitized = safeSerialize(parsed, {
       docPath: options.docPath,
