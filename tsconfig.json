@@ -5,6 +5,11 @@
     "types": ["vite/client", "node"]
   },
   "files": [],
+  "exclude": [
+    "src/lib/__tests__/**/*",
+    "**/*.test.ts",
+    "**/*.test.tsx"
+  ],
   "references": [
     { "path": "./tsconfig.app.json" },
     { "path": "./tsconfig.node.json" }
