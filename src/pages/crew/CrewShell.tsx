@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { NavLink, Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { liveQuery } from 'dexie'
 import { Award as AwardIcon, Trophy, Users as UsersIcon, Zap } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
@@ -217,35 +217,37 @@ export default function CrewShell({ syncStatus }: CrewShellProps) {
       </Card>
 
       <Routes>
-        <Route path="/crew/profiles" element={<ProfilesPage users={filteredUsers} />} />
-        <Route
-          path="/crew/profiles/:userId"
-          element={
-            <ProfileDetailPage
-              users={users}
-              kudos={kudos}
-              jobs={jobsList}
-              onNavigateBack={() => navigate('/crew/profiles')}
-            />
-          }
-        />
-        <Route
-          path="/crew/leaderboards"
-          element={
-            <LeaderboardsPage
-              users={users}
-              categories={categories}
-              formatValue={(category, value) => formatStatValue(category, value)}
-              getValue={(category, user) => getCategoryValue(user, category)}
-              sortUsers={(category) => sortUsersForCategory(users, category)}
-            />
-          }
-        />
-        <Route
-          path="/crew/awards"
-          element={<AwardsPage users={users} awards={awards} policy={policy} />}
-        />
-        <Route path="/crew" element={<Navigate to="/crew/profiles" replace />} />
+        <Route path="/crew" element={<Outlet />}>
+          <Route index element={<Navigate to="/crew/profiles" replace />} />
+          <Route path="profiles" element={<ProfilesPage users={filteredUsers} />} />
+          <Route
+            path="profiles/:userId"
+            element={
+              <ProfileDetailPage
+                users={users}
+                kudos={kudos}
+                jobs={jobsList}
+                onNavigateBack={() => navigate('/crew/profiles')}
+              />
+            }
+          />
+          <Route
+            path="leaderboards"
+            element={
+              <LeaderboardsPage
+                users={users}
+                categories={categories}
+                formatValue={(category, value) => formatStatValue(category, value)}
+                getValue={(category, user) => getCategoryValue(user, category)}
+                sortUsers={(category) => sortUsersForCategory(users, category)}
+              />
+            }
+          />
+          <Route
+            path="awards"
+            element={<AwardsPage users={users} awards={awards} policy={policy} />}
+          />
+        </Route>
       </Routes>
     </div>
   )
