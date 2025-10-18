@@ -8,7 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Route, Routes, useOutlet } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -854,6 +854,7 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const previousJobIdRef = useRef<number | null>(null)
   const notesPrevValueRef = useRef<string | undefined>(undefined)
   const crewNotesAutoSaveTimeoutRef = useRef<number | null>(null)
+  const outlet = useOutlet()
 
   const [mediaItems, setMediaItems] = useState<JobMedia[]>([])
   const [mediaLoading, setMediaLoading] = useState(false)
@@ -2276,6 +2277,23 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     },
     [setBoardTab, setView],
   )
+
+  if (outlet) {
+    return (
+      <>
+        <LayerHost />
+        <div className="min-h-screen w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
+          {stripesStyleElement}
+          <main
+            className="relative z-10 pt-16 pb-24 sm:pb-28"
+            style={{ paddingBottom: 'calc(96px + env(safe-area-inset-bottom, 0px))' }}
+          >
+            <div className="mx-auto w-full max-w-6xl px-4">{outlet}</div>
+          </main>
+        </div>
+      </>
+    )
+  }
 
   return (
     <>
@@ -4428,11 +4446,12 @@ function AppShell() {
     <BrowserRouter>
       {user ? (
         <Routes>
-          <Route path="/crew/profiles" element={<Profiles />} />
-          <Route path="/crew/profiles/:userId" element={<ProfileDetail />} />
-          <Route path="/crew/leaderboards" element={<Leaderboards />} />
-          <Route path="/crew/awards" element={<Awards />} />
-          <Route path="*" element={<AuthedShell user={user} onLogout={handleLogout} />} />
+          <Route path="/*" element={<AuthedShell user={user} onLogout={handleLogout} />}>
+            <Route path="crew/profiles" element={<Profiles />} />
+            <Route path="crew/profiles/:userId" element={<ProfileDetail />} />
+            <Route path="crew/leaderboards" element={<Leaderboards />} />
+            <Route path="crew/awards" element={<Awards />} />
+          </Route>
         </Routes>
       ) : (
         <LoginShell pin={pin} setPin={setPin} onLogin={handleLogin} />
