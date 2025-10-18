@@ -12,12 +12,17 @@ import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { getBytes, ref, uploadBytes } from 'firebase/storage';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const projectRoot = resolve(__dirname, '..');
+const firebaseJson = JSON.parse(
+  readFileSync(resolve(projectRoot, 'firebase.json'), 'utf8'),
+);
+
 const FIRESTORE_RULES = readFileSync(
-  resolve(__dirname, '..', 'firestore.rules'),
+  resolve(projectRoot, firebaseJson.firestore?.rules ?? 'firestore.rules'),
   'utf8',
 );
 const STORAGE_RULES = readFileSync(
-  resolve(__dirname, '..', 'storage.rules'),
+  resolve(projectRoot, firebaseJson.storage?.rules ?? 'storage.rules'),
   'utf8',
 );
 
