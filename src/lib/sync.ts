@@ -51,6 +51,11 @@ import {
 
 type SyncStatus = 'offline' | 'idle' | 'pushing' | 'pulling' | 'error'
 
+type PrepareJobResult = ReturnType<typeof safePrepareJobForFirestore>
+const isPrepareFailure = (
+  prepared: PrepareJobResult,
+): prepared is Extract<PrepareJobResult, { success: false }> => !prepared.success
+
 const LAST_SYNC_KEY = 'sync:lastSuccess'
 
 export type SyncState = {
@@ -344,8 +349,8 @@ const writeRemoteJobsToDexie = async (
     }
     const prepared = safePrepareJobForFirestore(normalizedData, { docPath })
 
-    if (!prepared.success) {
-      const failure = prepared as { success: false; error: JobValidationError }
+    if (isPrepareFailure(prepared)) {
+      const { error } = prepared
       const fieldTypes = timeFields.reduce<Record<string, string>>((acc, field) => {
         const value = normalizedData[field]
         acc[field] = value === null ? 'null' : typeof value
@@ -353,7 +358,7 @@ const writeRemoteJobsToDexie = async (
       }, {})
       console.error(`[sync] skipped remote job ${docPath}`, {
         fieldTypes,
-        issues: failure.error.issues,
+        issues: error.issues,
       })
       continue
     }
@@ -913,9 +918,9 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
       {
         const docPath = `jobs/${op.job.id}`
         const prepared = safePrepareJobForFirestore(op.job, { docPath })
-        if (!prepared.success) {
-          const failure = prepared as { success: false; error: JobValidationError }
-          handleValidationFailure(failure.error, docPath)
+        if (isPrepareFailure(prepared)) {
+          const { error } = prepared
+          handleValidationFailure(error, docPath)
           return
         }
         const { data, warnings, report } = prepared.result
