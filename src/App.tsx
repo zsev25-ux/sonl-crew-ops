@@ -8,7 +8,7 @@ import React, {
   useRef,
   useState,
 } from 'react'
-import { BrowserRouter, Route, Routes, useOutlet } from 'react-router-dom'
+import { BrowserRouter, Route, Routes, Link, Navigate, useLocation } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -185,6 +185,12 @@ const SAMPLE_CREW_MEMBERS: CrewMember[] = [
       totalKudos: 33,
     },
   },
+]
+
+const CREW_NAV_ITEMS = [
+  { to: '/crew/profiles', label: 'Profiles' },
+  { to: '/crew/leaderboards', label: 'Leaderboards' },
+  { to: '/crew/awards', label: 'Awards' },
 ]
 
 const SAMPLE_KUDOS: KudosEntry[] = [
@@ -768,6 +774,9 @@ function validateNewJob(
 }
 
 function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
+  const location = useLocation()
+  const isCrewRoute = location.pathname.startsWith('/crew')
+
   const sanitizedInitialJobs = useMemo(
     () => sanitizeJobs(initialJobs, initialJobs),
     [],
@@ -2278,21 +2287,8 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
     [setBoardTab, setView],
   )
 
-  if (outlet) {
-    return (
-      <>
-        <LayerHost />
-        <div className="min-h-screen w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
-          {stripesStyleElement}
-          <main
-            className="relative z-10 pt-16 pb-24 sm:pb-28"
-            style={{ paddingBottom: 'calc(96px + env(safe-area-inset-bottom, 0px))' }}
-          >
-            <div className="mx-auto w-full max-w-6xl px-4">{outlet}</div>
-          </main>
-        </div>
-      </>
-    )
+  if (isCrewRoute) {
+    return <CrewPortal onLogout={onLogout} />
   }
 
   return (
@@ -4408,6 +4404,71 @@ function ProfileScreen({
   )
 }
 
+function CrewPortal({ onLogout }: { onLogout: () => void }) {
+  const location = useLocation()
+
+  return (
+    <div className={`min-h-screen ${THEME.bg}`}>
+      <div className="mx-auto flex min-h-screen max-w-6xl flex-col gap-6 px-4 py-8 text-slate-100">
+        <header className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.3rem] text-amber-300/80">Crew portal</p>
+            <h1 className="mt-1 text-3xl font-semibold text-white">Stay synced with the crew</h1>
+            <p className="mt-2 max-w-xl text-sm text-slate-400">
+              Crew tools live inside the ops shell so your authenticated session and sync state stay active while you review
+              profiles and leaderboards.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Link
+              to="/"
+              className="inline-flex items-center rounded-full border border-amber-400/40 bg-transparent px-5 py-2 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+            >
+              Back to ops board
+            </Link>
+            <Button
+              onClick={onLogout}
+              className="inline-flex items-center gap-2 rounded-full bg-amber-500 px-5 py-2 text-sm font-semibold text-slate-900 transition hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+            >
+              <LogOut className="h-4 w-4" />
+              Logout
+            </Button>
+          </div>
+        </header>
+
+        <nav className="flex flex-wrap items-center gap-2">
+          {CREW_NAV_ITEMS.map((item) => {
+            const active = location.pathname.startsWith(item.to)
+            return (
+              <Link
+                key={item.to}
+                to={item.to}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                  active
+                    ? 'bg-amber-500 text-slate-900 shadow-[0_0_20px_rgba(251,191,36,0.35)]'
+                    : 'border border-slate-800 bg-slate-900/60 text-slate-100 hover:bg-slate-800'
+                }`}
+              >
+                {item.label}
+              </Link>
+            )
+          })}
+        </nav>
+
+        <div className="flex-1 overflow-hidden rounded-3xl border border-slate-800 bg-slate-950/40">
+          <Routes>
+            <Route path="/crew/profiles" element={<Profiles />} />
+            <Route path="/crew/profiles/:userId" element={<ProfileDetail />} />
+            <Route path="/crew/leaderboards" element={<Leaderboards />} />
+            <Route path="/crew/awards" element={<Awards />} />
+            <Route path="*" element={<Navigate to="/crew/profiles" replace />} />
+          </Routes>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AppShell() {
   const [user, setUser] = useState<User | null>(null)
   const [pin, setPin] = useState('')
@@ -4445,14 +4506,7 @@ function AppShell() {
   return (
     <BrowserRouter>
       {user ? (
-        <Routes>
-          <Route path="/*" element={<AuthedShell user={user} onLogout={handleLogout} />}>
-            <Route path="crew/profiles" element={<Profiles />} />
-            <Route path="crew/profiles/:userId" element={<ProfileDetail />} />
-            <Route path="crew/leaderboards" element={<Leaderboards />} />
-            <Route path="crew/awards" element={<Awards />} />
-          </Route>
-        </Routes>
+        <AuthedShell user={user} onLogout={handleLogout} />
       ) : (
         <LoginShell pin={pin} setPin={setPin} onLogin={handleLogin} />
       )}
