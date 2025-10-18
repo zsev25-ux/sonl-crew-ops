@@ -742,11 +742,13 @@ const processMediaUpload = async (mediaId: string, opId: string) => {
   })
 
   const remoteUrl = await getDownloadURL(uploadTask.snapshot.ref)
-  await setMediaStatus(mediaId, 'uploading', {
+  const remoteMetadata = {
     remoteUrl,
     remotePath: storagePath,
-    error: null,
-  })
+    error: null as string | null,
+  }
+
+  await setMediaStatus(mediaId, 'uploading', remoteMetadata)
 
   if (media.jobId) {
     try {
@@ -764,23 +766,20 @@ const processMediaUpload = async (mediaId: string, opId: string) => {
         },
         { merge: true },
       )
+      await setMediaStatus(mediaId, 'synced', remoteMetadata)
+      return
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to persist media metadata'
       await setMediaStatus(mediaId, 'error', {
-        remoteUrl,
-        remotePath: storagePath,
+        ...remoteMetadata,
         error: message,
       })
       throw error
     }
   }
 
-  await setMediaStatus(mediaId, 'synced', {
-    remoteUrl,
-    remotePath: storagePath,
-    error: null,
-  })
+  await setMediaStatus(mediaId, 'synced', remoteMetadata)
 }
 
 const runOperation = async (op: PendingOpRecord): Promise<void> => {
