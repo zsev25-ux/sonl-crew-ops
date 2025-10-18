@@ -36,7 +36,7 @@ import {
   saveMeta,
   type JobMeta,
 } from '@/lib/jobmeta'
-import { cloudEnabled, ensureAnonAuth, db as cloudDb } from '@/lib/firebase'
+import { cloudEnabled, db as cloudDb } from '@/lib/firebase'
 import {
   enqueueSyncOp,
   subscribeFirestore,
@@ -59,6 +59,7 @@ import {
   Users,
   type LucideIcon,
 } from 'lucide-react'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import ReactDOM from "react-dom"
 import {
@@ -101,8 +102,6 @@ const fadeInVariants = {
   visible: { opacity: 1 },
 }
 
-type LeaderboardCategory = 'bonus' | 'speed' | 'quality'
-type ReactionEmoji = '🔥' | '💡' | '💪'
 type AchievementKey = 'five_streak' | 'route_master' | 'client_favorite'
 type View = 'route' | 'board' | 'hq' | 'inventory' | 'profile'
 type BoardTab = 'clients' | 'admin'
@@ -115,118 +114,6 @@ const STORAGE_SOURCE_LABEL: Record<BootstrapSource, string> = {
   'legacy-localStorage': 'Legacy migration',
   fallback: 'In-memory fallback',
 }
-
-type CrewMember = {
-  id: string
-  name: string
-  crew: string
-  stats: {
-    efficiencyBonuses: number
-    averageInstallTime: number
-    totalKudos: number
-  }
-}
-
-type KudosEntry = {
-  id: string
-  crew: string
-  message: string
-  image: string
-  timestamp: string
-  reactions: Record<ReactionEmoji, number>
-}
-
-const SAMPLE_CREW_MEMBERS: CrewMember[] = [
-  {
-    id: 'luke',
-    name: 'Luke',
-    crew: 'Crew Alpha',
-    stats: {
-      efficiencyBonuses: 18,
-      averageInstallTime: 2.4,
-      totalKudos: 46,
-    },
-  },
-  {
-    id: 'maria',
-    name: 'Maria',
-    crew: 'Crew Bravo',
-    stats: {
-      efficiencyBonuses: 22,
-      averageInstallTime: 2.1,
-      totalKudos: 52,
-    },
-  },
-  {
-    id: 'darius',
-    name: 'Darius',
-    crew: 'Crew Alpha',
-    stats: {
-      efficiencyBonuses: 15,
-      averageInstallTime: 2.8,
-      totalKudos: 38,
-    },
-  },
-  {
-    id: 'ava',
-    name: 'Ava',
-    crew: 'Crew Support',
-    stats: {
-      efficiencyBonuses: 19,
-      averageInstallTime: 2.0,
-      totalKudos: 61,
-    },
-  },
-  {
-    id: 'jasper',
-    name: 'Jasper',
-    crew: 'Dispatcher',
-    stats: {
-      efficiencyBonuses: 12,
-      averageInstallTime: 3.1,
-      totalKudos: 33,
-    },
-  },
-]
-
-const SAMPLE_KUDOS: KudosEntry[] = [
-  {
-    id: 'k1',
-    crew: 'Crew Alpha',
-    message: 'Crushed the Country Ridge install in record time. Zero call-backs.',
-    image: '/sample/crew-alpha.jpg',
-    timestamp: '2025-11-17T18:45:00Z',
-    reactions: {
-      '🔥': 12,
-      '💡': 3,
-      '💪': 8,
-    },
-  },
-  {
-    id: 'k2',
-    crew: 'Crew Bravo',
-    message: 'Maria and team re-lit Patriot Subdivision after the storm. Residents ecstatic.',
-    image: '/sample/crew-bravo.jpg',
-    timestamp: '2025-11-15T23:12:00Z',
-    reactions: {
-      '🔥': 7,
-      '💡': 5,
-      '💪': 11,
-    },
-  },
-  {
-    id: 'k3',
-    crew: 'Crew Support',
-    message: 'Ava turned around three VIP calls in one afternoon, new seasonal record.',
-    image: '/sample/crew-support.jpg',
-    timestamp: '2025-11-14T15:02:00Z',
-    reactions: {
-      '🔥': 5,
-      '💡': 9,
-      '💪': 6,
-    },
-  },
-]
 
 const crewOptions: CrewOption[] = ['Crew Alpha', 'Crew Bravo', 'Both Crews']
 
@@ -814,6 +701,10 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const suppressJobsQueueRef = useRef(false)
   const previousPolicyRef = useRef<Policy>(sanitizedDefaultPolicy)
   const suppressPolicyQueueRef = useRef(false)
+  const location = useLocation()
+  const navigate = useNavigate()
+  const lastPrimaryViewRef = useRef<View>('route')
+  const isCrewRoute = location.pathname.startsWith('/crew')
 
   const [scheduleForm, setScheduleForm] = useState<JobFormState>(() =>
     createEmptyForm({ date: activeDate }),
@@ -2269,13 +2160,35 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   }, [])
   const handleViewSelect = useCallback(
     (next: View) => {
+      if (next === 'hq') {
+        if (!isCrewRoute) {
+          navigate('/crew/profiles')
+        }
+        setView('hq')
+        return
+      }
+      lastPrimaryViewRef.current = next
       setView(next)
+      if (isCrewRoute) {
+        navigate('/')
+      }
       if (next === 'board') {
         setBoardTab('clients')
       }
     },
-    [setBoardTab, setView],
+    [isCrewRoute, navigate, setBoardTab],
   )
+
+  useEffect(() => {
+    if (isCrewRoute) {
+      if (view !== 'hq') {
+        lastPrimaryViewRef.current = view
+        setView('hq')
+      }
+    } else if (view === 'hq') {
+      setView(lastPrimaryViewRef.current)
+    }
+  }, [isCrewRoute, view])
 
   return (
     <>
@@ -2359,7 +2272,11 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
                 </div>
               </motion.div>
 
-              {view === 'route' && (
+              {isCrewRoute ? (
+                <CrewShell syncStatus={syncStatus} />
+              ) : (
+                <>
+                  {view === 'route' && (
         <motion.div
           variants={fadeInVariants}
           initial="hidden"
@@ -3339,15 +3256,16 @@ function AuthedShell({ user, onLogout }: { user: User; onLogout: () => void }) {
           </Card>
         </motion.div>
       )}
-      {view === 'hq' && <CrewHQ />}
-      {view === 'profile' && (
-        <ProfileScreen
-          user={user}
-          onLogout={onLogout}
-          syncStatus={syncStatus}
-          onSyncNow={syncNow}
-        />
-      )}
+                  {view === 'profile' && (
+                    <ProfileScreen
+                      user={user}
+                      onLogout={onLogout}
+                      syncStatus={syncStatus}
+                      onSyncNow={syncNow}
+                    />
+                  )}
+                </>
+              )}
             </div>
           </div>
         </main>

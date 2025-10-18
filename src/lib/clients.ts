@@ -13,7 +13,7 @@ export type Client = {
   vip: boolean
 }
 
-export const cleanStr = (value: any): string => {
+export const cleanStr = (value: unknown): string => {
   if (value === null || value === undefined) {
     return ''
   }
@@ -21,7 +21,7 @@ export const cleanStr = (value: any): string => {
   return String(value).replace(/\s+/g, ' ').trim()
 }
 
-export const num = (value: any): number => {
+export const num = (value: unknown): number => {
   const sanitized = cleanStr(value).replace(/[$,]/g, '')
   if (!sanitized) {
     return 0

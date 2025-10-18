@@ -56,9 +56,23 @@ export type KudosRecord = {
 export type UserRecord = {
   id: string
   displayName: string
-  profileImageUrl?: string
+  role: 'crew' | 'admin' | 'owner'
+  bio?: string
+  photoURL?: string
   stats?: Record<string, unknown>
-  achievements?: Record<string, unknown>
+  season?: Record<string, unknown>
+  createdAt?: number
+  updatedAt: number
+}
+
+export type AwardRecord = {
+  id: string
+  userRefId: string
+  seasonId: string
+  key: string
+  title: string
+  icon?: string
+  earnedAt: number
   updatedAt: number
 }
 
@@ -87,6 +101,9 @@ export type PendingOpType =
   | 'policy.update'
   | 'kudos.react'
   | 'media.upload'
+  | 'user.update'
+  | 'user.avatar.upload'
+  | 'award.grant'
   | 'custom'
 
 export type PendingOpRecord = {
@@ -107,6 +124,7 @@ export type TableKey =
   | 'state'
   | 'kudos'
   | 'users'
+  | 'awards'
   | 'media'
   | 'pendingOps'
 
@@ -117,6 +135,7 @@ type TableValue =
   | AppStateRecord
   | KudosRecord
   | UserRecord
+  | AwardRecord
   | MediaRecord
   | PendingOpRecord
 
@@ -129,6 +148,7 @@ export class SonlCrewOpsDexie extends Dexie {
   state!: Table<AppStateRecord, string>
   kudos!: Table<KudosRecord, string>
   users!: Table<UserRecord, string>
+  awards!: Table<AwardRecord, string>
   media!: Table<MediaRecord, string>
   pendingOps!: Table<PendingOpRecord, string>
 }
@@ -141,6 +161,7 @@ const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
     state: '&key',
     kudos: '&id,updatedAt',
     users: '&id,updatedAt',
+    awards: '&id,userRefId,seasonId,updatedAt',
     media: '&id,jobId,updatedAt',
     pendingOps: '&queueId,table,ts',
   })
@@ -153,6 +174,7 @@ const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
       state: '&key',
       kudos: '&id,updatedAt',
       users: '&id,updatedAt',
+      awards: '&id,userRefId,seasonId,updatedAt',
       media: '&id,jobId,updatedAt',
       pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
     })
@@ -207,6 +229,7 @@ const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
       state: '&key',
       kudos: '&id,updatedAt',
       users: '&id,updatedAt',
+      awards: '&id,userRefId,seasonId,updatedAt',
       media: '&id,jobId,updatedAt',
       pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
     })
@@ -371,6 +394,8 @@ const readTable = <T extends TableValue>(
       return db.kudos as Table<T, string>
     case 'users':
       return db.users as Table<T, string>
+    case 'awards':
+      return db.awards as Table<T, string>
     case 'media':
       return db.media as Table<T, string>
     case 'pendingOps':

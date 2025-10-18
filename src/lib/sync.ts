@@ -15,7 +15,6 @@ import {
   setMediaStatus,
   updatePendingOp,
   type PendingOpRecord,
-  type PendingOpType,
 } from '@/lib/db'
 import type { Job, Policy } from '@/lib/types'
 import {
@@ -43,11 +42,7 @@ import {
   type QueryDocumentSnapshot,
   type Unsubscribe,
 } from 'firebase/firestore'
-import {
-  getDownloadURL,
-  ref as storageRef,
-  uploadBytesResumable,
-} from 'firebase/storage'
+import { getDownloadURL, ref as storageRef, uploadBytes } from 'firebase/storage'
 
 type SyncStatus = 'offline' | 'idle' | 'pushing' | 'pulling' | 'error'
 
@@ -407,6 +402,33 @@ const writeRemotePolicyToDexie = async (
   }
   const data = snapshot.data() as Record<string, unknown>
   const updatedAt = toMillis(data.updatedAt)
+  const seasonData =
+    data.season && typeof data.season === 'object'
+      ? {
+          id: String((data.season as Record<string, unknown>).id ?? 'season'),
+          start: toMillis((data.season as Record<string, unknown>).start),
+          end: toMillis((data.season as Record<string, unknown>).end),
+        }
+      : undefined
+  const leaderboardCategories = Array.isArray(data.leaderboardCategories)
+    ? (data.leaderboardCategories as Record<string, unknown>[]).map((entry) => ({
+        key: String(entry.key ?? 'kudos'),
+        label: String(entry.label ?? 'Leaderboard'),
+        field: String(entry.field ?? 'stats.kudos'),
+        higherIsBetter: entry.higherIsBetter !== false,
+      }))
+    : undefined
+  const awardRules = Array.isArray(data.awardRules)
+    ? (data.awardRules as Record<string, unknown>[]).map((entry) => ({
+        key: String(entry.key ?? 'award'),
+        title: String(entry.title ?? 'Award'),
+        criteria:
+          entry.criteria && typeof entry.criteria === 'object'
+            ? (entry.criteria as Record<string, unknown>)
+            : {},
+      }))
+    : undefined
+
   const policy: Policy = {
     cutoffDateISO: typeof data.cutoffDateISO === 'string' ? data.cutoffDateISO : '2025-12-31',
     blockedClients: Array.isArray(data.blockedClients)
@@ -416,6 +438,9 @@ const writeRemotePolicyToDexie = async (
       typeof data.maxJobsPerDay === 'number' && data.maxJobsPerDay > 0
         ? Math.floor(data.maxJobsPerDay)
         : 2,
+    season: seasonData,
+    leaderboardCategories,
+    awardRules,
   }
   const existing = await db.policy.get('org')
   const existingUpdated = (existing?.updatedAt as number | undefined) ?? 0
@@ -580,16 +605,54 @@ export function subscribeFirestore(handlers: FirestoreSubscribeHandlers = {}): (
               const data = docSnap.data() as Record<string, unknown>
               return {
                 id: docSnap.id,
-                displayName: String(data.displayName ?? 'Crew'),
-                profileImageUrl: (data.profileImageUrl as string) ?? undefined,
+                displayName: String(data.displayName ?? 'Crew Member'),
+                role: (data.role as 'crew' | 'admin' | 'owner') ?? 'crew',
+                bio: typeof data.bio === 'string' ? data.bio : undefined,
+                photoURL:
+                  (data.photoURL as string) ?? (data.profileImageUrl as string) ?? undefined,
                 stats: (data.stats as Record<string, unknown>) ?? {},
-                achievements: (data.achievements as Record<string, unknown>) ?? {},
+                season:
+                  data.season && typeof data.season === 'object'
+                    ? (data.season as Record<string, unknown>)
+                    : undefined,
+                createdAt:
+                  data.createdAt !== undefined
+                    ? toMillis(data.createdAt as Timestamp | number)
+                    : undefined,
                 updatedAt: toMillis(data.updatedAt),
               }
             })
           },
           () => {
             /* ignore users errors */
+          },
+        ),
+      )
+
+      const awardsCollection = collection(cloudDb, 'awards')
+      unsubs.push(
+        onSnapshot(
+          awardsCollection,
+          async (snapshot) => {
+            if (cancelled) {
+              return
+            }
+            await writeRemoteCollection(db.awards, snapshot.docs, (docSnap) => {
+              const data = docSnap.data() as Record<string, unknown>
+              return {
+                id: docSnap.id,
+                userRefId: String((data.userRefId ?? data.userId) ?? ''),
+                seasonId: String(data.seasonId ?? ''),
+                key: String(data.key ?? ''),
+                title: String(data.title ?? ''),
+                icon: (data.icon as string) ?? undefined,
+                earnedAt: toMillis(data.earnedAt),
+                updatedAt: toMillis(data.updatedAt),
+              }
+            })
+          },
+          () => {
+            /* ignore awards errors */
           },
         ),
       )
@@ -783,6 +846,87 @@ const processMediaUpload = async (mediaId: string, opId: string) => {
   })
 }
 
+const performUserDocumentUpdate = async (
+  userId: string,
+  changes: Partial<CrewUser>,
+  opId: string,
+) => {
+  if (!cloudDb) {
+    return
+  }
+  await setDoc(
+    doc(cloudDb, 'users', userId),
+    {
+      ...changes,
+      updatedAt: serverTimestamp(),
+      lastOpId: opId,
+    },
+    { merge: true },
+  )
+}
+
+const dataUrlToBlob = async (dataUrl: string, contentType?: string): Promise<Blob> => {
+  if (dataUrl.startsWith('data:')) {
+    const response = await fetch(dataUrl)
+    const blob = await response.blob()
+    if (contentType && blob.type !== contentType) {
+      return blob.slice(0, blob.size, contentType)
+    }
+    return blob
+  }
+  const binary = atob(dataUrl)
+  const array = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    array[index] = binary.charCodeAt(index)
+  }
+  return new Blob([array], { type: contentType ?? 'application/octet-stream' })
+}
+
+const performUserAvatarUpload = async (
+  userId: string,
+  dataUrl: string,
+  contentType: string | undefined,
+  opId: string,
+) => {
+  if (!cloudDb || !cloudStorage) {
+    return
+  }
+  const blob = await dataUrlToBlob(dataUrl, contentType)
+  const path = `avatars/${userId}/${opId}.jpg`
+  const ref = storageRef(cloudStorage, path)
+  const snapshot = await uploadBytes(ref, blob, {
+    contentType: contentType ?? blob.type ?? 'image/jpeg',
+  })
+  const url = await getDownloadURL(snapshot.ref)
+  await setDoc(
+    doc(cloudDb, 'users', userId),
+    {
+      photoURL: url,
+      updatedAt: serverTimestamp(),
+      lastOpId: opId,
+    },
+    { merge: true },
+  )
+  await db.users.update(userId, { photoURL: url, updatedAt: Date.now() })
+}
+
+const performAwardGrant = async (award: AwardDocument, opId: string) => {
+  if (!cloudDb) {
+    return
+  }
+  const awardId = award.id || `${award.userRefId}-${award.key}-${award.seasonId}`
+  await setDoc(
+    doc(cloudDb, 'awards', awardId),
+    {
+      ...award,
+      id: awardId,
+      updatedAt: serverTimestamp(),
+      lastOpId: opId,
+    },
+    { merge: true },
+  )
+}
+
 const runOperation = async (op: PendingOpRecord): Promise<void> => {
   if (!cloudDb) {
     return
@@ -822,6 +966,27 @@ const runOperation = async (op: PendingOpRecord): Promise<void> => {
       const payload = op.payload as { mediaId?: string }
       if (typeof payload?.mediaId === 'string' && payload.mediaId) {
         await processMediaUpload(payload.mediaId, op.id)
+      }
+      break
+    }
+    case 'user.update': {
+      const payload = op.payload as { userId?: string; changes?: Partial<CrewUser> }
+      if (payload?.userId && payload.changes) {
+        await performUserDocumentUpdate(payload.userId, payload.changes, op.id)
+      }
+      break
+    }
+    case 'user.avatar.upload': {
+      const payload = op.payload as { userId?: string; dataUrl?: string; contentType?: string }
+      if (payload?.userId && payload.dataUrl) {
+        await performUserAvatarUpload(payload.userId, payload.dataUrl, payload.contentType, op.id)
+      }
+      break
+    }
+    case 'award.grant': {
+      const payload = op.payload as { award?: AwardDocument }
+      if (payload?.award) {
+        await performAwardGrant(payload.award, op.id)
       }
       break
     }
@@ -939,6 +1104,19 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
       break
     case 'media.upload':
       payload = { mediaId: op.mediaId }
+      break
+    case 'user.update':
+      payload = { userId: op.userId, changes: op.changes }
+      break
+    case 'user.avatar.upload':
+      payload = {
+        userId: op.userId,
+        dataUrl: op.dataUrl,
+        contentType: op.contentType,
+      }
+      break
+    case 'award.grant':
+      payload = { award: op.award }
       break
     case 'custom':
       payload = op.payload
