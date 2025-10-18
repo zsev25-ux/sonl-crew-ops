@@ -153,47 +153,6 @@ const toMillisAny = (value: unknown): number | undefined => {
   return undefined
 }
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (value === null || typeof value !== 'object') {
-    return false
-  }
-  const proto = Object.getPrototypeOf(value)
-  return proto === Object.prototype || proto === null
-}
-
-const stripUndefinedDeep = <T>(obj: T): T => {
-  if (obj === null || typeof obj !== 'object') {
-    return obj
-  }
-
-  if (Array.isArray(obj)) {
-    const cleaned: unknown[] = []
-    for (const item of obj) {
-      const sanitized = stripUndefinedDeep(item)
-      if (sanitized !== undefined) {
-        cleaned.push(sanitized)
-      }
-    }
-    return cleaned as unknown as T
-  }
-
-  if (!isPlainObject(obj)) {
-    return obj
-  }
-
-  const result: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(obj)) {
-    if (value === undefined) {
-      continue
-    }
-    const sanitized = stripUndefinedDeep(value)
-    if (sanitized !== undefined) {
-      result[key] = sanitized
-    }
-  }
-  return result as T
-}
-
 const recordLastSync = async (timestamp: number) => {
   try {
     await db.state.put({ key: LAST_SYNC_KEY, value: timestamp, updatedAt: timestamp })
@@ -649,7 +608,7 @@ const performJobWrite = async (rawJob: unknown, opId: string) => {
     notifySanitizedDoc(docPath, report)
   }
 
-  const payload = stripUndefinedDeep({
+  const payload = stripUndefined({
     ...job,
     bothCrews: job.crew === 'Both Crews',
     updatedAt: serverTimestamp(),
@@ -672,7 +631,7 @@ const performPolicyUpdate = async (policy: Policy, opId: string) => {
   }
   const docPath = 'config/policy'
   const clean = safeSerialize(stripUndefined(policy), { docPath })
-  const payload = stripUndefinedDeep({
+  const payload = stripUndefined({
     ...clean,
     updatedAt: serverTimestamp(),
     lastOpId: opId,
@@ -691,7 +650,7 @@ const performKudosReact = async (
     return
   }
   const actor = typeof by === 'string' ? by.trim() || 'Crew' : 'Crew'
-  const payload = stripUndefinedDeep({
+  const payload = stripUndefined({
     updatedAt: serverTimestamp(),
     lastOpId: opId,
     lastActor: actor,
@@ -754,18 +713,19 @@ const processMediaUpload = async (mediaId: string, opId: string) => {
 
   if (media.jobId) {
     try {
+      const payload = stripUndefined({
+        id: mediaId,
+        jobId: media.jobId,
+        name: media.name,
+        type: media.type,
+        size: media.size,
+        url: remoteUrl,
+        createdAt: serverTimestamp(),
+        lastOpId: opId,
+      })
       await setDoc(
         doc(cloudDb, 'jobs', String(media.jobId), 'media', mediaId),
-        {
-          id: mediaId,
-          jobId: media.jobId,
-          name: media.name,
-          type: media.type,
-          size: media.size,
-          url: remoteUrl,
-          createdAt: serverTimestamp(),
-          lastOpId: opId,
-        },
+        payload,
         { merge: true },
       )
       await setMediaStatus(mediaId, 'synced', remoteMetadata)

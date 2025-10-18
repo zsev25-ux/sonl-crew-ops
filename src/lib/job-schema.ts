@@ -10,6 +10,49 @@ export type JobSchemaContext = {
 const hasToMillis = (value: unknown): value is { toMillis: () => number } =>
   typeof value === 'object' && value !== null && typeof (value as { toMillis?: unknown }).toMillis === 'function'
 
+const hasSecondsAndNanoseconds = (
+  value: unknown,
+): value is { seconds: number; nanoseconds: number } =>
+  typeof value === 'object' &&
+  value !== null &&
+  typeof (value as { seconds?: unknown }).seconds === 'number' &&
+  typeof (value as { nanoseconds?: unknown }).nanoseconds === 'number'
+
+const isTimestampLike = (
+  value: unknown,
+): value is { toMillis: () => number } | { seconds: number; nanoseconds: number } =>
+  hasToMillis(value) || hasSecondsAndNanoseconds(value)
+
+const toMillis = (value: unknown): number | undefined => {
+  if (value == null) {
+    return undefined
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined
+  }
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  if (value instanceof Date) {
+    const time = value.getTime()
+    return Number.isFinite(time) ? time : undefined
+  }
+  if (hasToMillis(value)) {
+    try {
+      const millis = value.toMillis()
+      return Number.isFinite(millis) ? millis : undefined
+    } catch {
+      return undefined
+    }
+  }
+  if (hasSecondsAndNanoseconds(value)) {
+    const millis = value.seconds * 1_000 + Math.floor(value.nanoseconds / 1_000_000)
+    return Number.isFinite(millis) ? millis : undefined
+  }
+  return undefined
+}
+
 const RawJobSchema = z
   .object({
     id: z.union([z.number(), z.string()]),
@@ -63,7 +106,9 @@ const RawJobSchema = z
       .optional(),
     vip: z.union([z.boolean(), z.number(), z.string()]).optional(),
     bothCrews: z.union([z.boolean(), z.number(), z.string()]).optional(),
-    updatedAt: z.union([z.number(), z.string(), z.date(), z.custom(hasToMillis)]).optional(),
+    updatedAt: z
+      .union([z.number(), z.string(), z.date(), z.custom(isTimestampLike)])
+      .optional(),
     meta: z.unknown().optional(),
   })
   .passthrough()
@@ -192,32 +237,7 @@ export const JobSchema = RawJobSchema.transform((raw, ctx) => {
   const lifetimeSpend = toOptionalNumber(raw.lifetimeSpend, warn, 'lifetimeSpend')
   const vip = toBoolean(raw.vip)
   const bothCrews = crew === 'Both Crews' || toBoolean(raw.bothCrews)
-  const updatedAtValue = (() => {
-    if (raw.updatedAt == null) {
-      return undefined
-    }
-    if (typeof raw.updatedAt === 'number') {
-      return Number.isFinite(raw.updatedAt) ? raw.updatedAt : undefined
-    }
-    if (typeof raw.updatedAt === 'string') {
-      const parsed = Date.parse(raw.updatedAt)
-      return Number.isFinite(parsed) ? parsed : undefined
-    }
-    if (raw.updatedAt instanceof Date) {
-      return Number.isFinite(raw.updatedAt.getTime()) ? raw.updatedAt.getTime() : undefined
-    }
-    if (hasToMillis(raw.updatedAt)) {
-      try {
-        const millis = raw.updatedAt.toMillis()
-        return Number.isFinite(millis) ? millis : undefined
-      } catch {
-        return undefined
-      }
-    }
-    return undefined
-  })()
-
-  const updatedAt = updatedAtValue
+  const updatedAt = toMillis(raw.updatedAt)
 
   const normalizedMeta = raw.meta
     ? normalizeJobMeta(raw.meta as Job['meta'] | undefined)
