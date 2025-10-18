@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
 import {
   assertFails,
@@ -8,43 +11,15 @@ import {
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { getBytes, ref, uploadBytes } from 'firebase/storage';
 
-const FIRESTORE_RULES = `rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    function isCrew() {
-      return request.auth != null;
-    }
-
-    match /jobs/{jobId} {
-      allow read, write: if isCrew();
-
-      match /media/{mediaId} {
-        allow read, write: if isCrew();
-      }
-    }
-
-    match /config/{docId} {
-      allow read, write: if isCrew();
-    }
-
-    match /kudos/{kudosId} {
-      allow read, write: if isCrew();
-    }
-
-    match /users/{userId} {
-      allow read, write: if isCrew();
-    }
-  }
-}`;
-
-const STORAGE_RULES = `rules_version = '2';
-service firebase.storage {
-  match /b/{bucket}/o {
-    match /jobs/{allPaths=**} {
-      allow read, write: if request.auth != null;
-    }
-  }
-}`;
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const FIRESTORE_RULES = readFileSync(
+  resolve(__dirname, '..', 'firestore.rules'),
+  'utf8',
+);
+const STORAGE_RULES = readFileSync(
+  resolve(__dirname, '..', 'storage.rules'),
+  'utf8',
+);
 
 let testEnv: RulesTestEnvironment;
 
