@@ -1,5 +1,7 @@
 import Dexie, { type Table } from 'dexie'
 import { normalizeMaterials, type JobMaterials } from '@/lib/jobmeta'
+import { safePrepareJobForFirestore } from '@/lib/job-schema'
+import { safeSerialize } from '@/lib/sanitize'
 
 export type JobRecord = {
   id: number
@@ -262,6 +264,81 @@ const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
           )
         }
       })
+    })
+
+  database.version(4)
+    .stores({
+      jobs: '&id,date,crew,updatedAt',
+      times: '&id,jobId,start,updatedAt,[jobId+start]',
+      policy: '&key',
+      state: '&key',
+      kudos: '&id,updatedAt',
+      users: '&id,updatedAt',
+      media: '&id,jobId,updatedAt',
+      pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
+    })
+    .upgrade(async (transaction) => {
+      const jobsTable = transaction.table('jobs')
+      let jobsFixed = 0
+      await jobsTable.toCollection().modify((record) => {
+        const docId = (record as { id?: unknown })?.id
+        const docPath = `dexie/jobs/${docId ?? 'unknown'}`
+        const prepared = safePrepareJobForFirestore(record, { docPath })
+        if (prepared.success) {
+          const { data } = prepared.result
+          const merged = safeSerialize({
+            ...record,
+            id: data.id,
+            date: data.date,
+            crew: data.crew,
+            client: data.client,
+            scope: data.scope,
+            notes: data.notes,
+            address: data.address,
+            neighborhood: data.neighborhood,
+            zip: data.zip,
+            houseTier: data.houseTier,
+            rehangPrice: data.rehangPrice ?? undefined,
+            lifetimeSpend: data.lifetimeSpend ?? undefined,
+            vip: data.vip,
+            bothCrews: data.crew === 'Both Crews',
+            meta: data.meta ?? (record as Record<string, unknown>).meta,
+          })
+          Object.assign(record, merged)
+          jobsFixed += 1
+        } else {
+          Object.assign(record, safeSerialize(record))
+        }
+      })
+
+      const pendingTable = transaction.table('pendingOps')
+      let pendingFixed = 0
+      await pendingTable.toCollection().modify((record) => {
+        if (!record || typeof record !== 'object') {
+          return
+        }
+        const payload = (record as { payload?: unknown }).payload
+        if (payload && typeof payload === 'object') {
+          const payloadRecord = payload as Record<string, unknown>
+          if (payloadRecord.job) {
+            const jobId = (payloadRecord.job as { id?: unknown })?.id ?? (record as { id?: string }).id
+            const prepared = safePrepareJobForFirestore(payloadRecord.job, {
+              docPath: `dexie/pending/${jobId ?? 'unknown'}`,
+            })
+            if (prepared.success) {
+              payloadRecord.job = prepared.result.data
+            } else {
+              delete payloadRecord.job
+            }
+            pendingFixed += 1
+          }
+          ;(record as Record<string, unknown>).payload = safeSerialize(payloadRecord)
+        }
+      })
+
+      if (jobsFixed || pendingFixed) {
+        console.info('[dexie-cleanup]', { jobsFixed, pendingFixed })
+      }
     })
 
   return database

@@ -17,7 +17,14 @@ import {
   type PendingOpType,
 } from '@/lib/db'
 import type { Job, Policy } from '@/lib/types'
-import { normalizeJobMeta } from '@/lib/jobmeta'
+import {
+  JobValidationError,
+  prepareJobForFirestore,
+  safePrepareJobForFirestore,
+  type JobSanitizationResult,
+} from '@/lib/job-schema'
+import { safeSerialize, stripUndefined, type SanitizationReport } from '@/lib/sanitize'
+import { showToast } from '@/lib/toast'
 import {
   collection,
   deleteDoc,
@@ -51,6 +58,7 @@ export type SyncState = {
   queued: number
   lastError: string | null
   lastSyncedAt: number | null
+  lastSanitizedAt: number | null
 }
 
 export type PendingOpPayload =
@@ -73,6 +81,7 @@ let syncState: SyncState = {
   queued: 0,
   lastError: null,
   lastSyncedAt: null,
+  lastSanitizedAt: null,
 }
 
 const listeners = new Set<(state: SyncState) => void>()
@@ -149,6 +158,61 @@ const computeDelay = (attempt: number): number => {
   return Math.round(Math.min(MAX_RETRY_DELAY, jitter))
 }
 
+const sanitizeNoticeCache = new Set<string>()
+const schemaWarningCache = new Set<string>()
+
+const extractFieldName = (path: string): string => {
+  const stripped = path.replace(/\[.*?\]/g, '')
+  const segments = stripped.split('.').filter(Boolean)
+  return segments[segments.length - 1] ?? stripped
+}
+
+const createSanitizeMessage = (
+  docPath: string,
+  report: SanitizationReport,
+): string | null => {
+  if (report.removedPaths.length > 0) {
+    const field = extractFieldName(report.removedPaths[0] ?? '')
+    return `Sync blocked: invalid field '${field}' (undefined). Fixed automatically and retried.`
+  }
+  if (report.replacedNumericPaths.length > 0) {
+    const field = extractFieldName(report.replacedNumericPaths[0] ?? '')
+    return `Sync blocked: invalid number in '${field}'. Fixed automatically and retried.`
+  }
+  return null
+}
+
+const notifySanitizedDoc = (docPath: string, report: SanitizationReport): void => {
+  const message = createSanitizeMessage(docPath, report)
+  if (!message) {
+    return
+  }
+  setSyncState({ lastError: message, lastSanitizedAt: Date.now() })
+  if (!sanitizeNoticeCache.has(docPath)) {
+    sanitizeNoticeCache.add(docPath)
+    showToast(message, 'warning')
+  }
+}
+
+const logSchemaWarnings = (docPath: string, warnings: string[]): void => {
+  if (warnings.length === 0 || schemaWarningCache.has(docPath)) {
+    return
+  }
+  schemaWarningCache.add(docPath)
+  console.warn('[job-schema]', docPath, warnings)
+}
+
+const handleValidationFailure = (
+  error: JobValidationError,
+  docPath: string,
+): void => {
+  const message =
+    error.message || `Sync failed: invalid data in '${docPath}'. See console for fields.`
+  console.error('[sync]', message, error.issues)
+  setSyncState({ status: 'error', lastError: message })
+  showToast(message, 'error')
+}
+
 export const updateConnectivity = (online: boolean): void => {
   setSyncState({
     status: online ? (syncState.status === 'error' ? 'error' : 'idle') : 'offline',
@@ -194,32 +258,44 @@ const toMillis = (value: unknown): number => {
 const writeRemoteJobsToDexie = async (
   docs: QueryDocumentSnapshot<DocumentData>[],
 ): Promise<Job[]> => {
-  const entries = docs.map((docSnap) => {
+  const entries: { job: Job; updatedAt: number }[] = []
+
+  for (const docSnap of docs) {
     const data = docSnap.data() as Record<string, unknown>
-    const jobId = Number(data.id ?? docSnap.id)
-    const updatedAt = toMillis(data.updatedAt)
-    const meta =
-      data.meta && typeof data.meta === 'object'
-        ? normalizeJobMeta(data.meta)
-        : undefined
-    const parsed: Job = {
-      id: Number.isFinite(jobId) ? jobId : Date.now(),
-      date: String(data.date ?? ''),
-      crew: String(data.crew ?? 'Crew Alpha'),
-      client: String(data.client ?? 'Client'),
-      scope: String(data.scope ?? ''),
-      notes: (data.notes as string) ?? undefined,
-      address: (data.address as string) ?? undefined,
-      neighborhood: (data.neighborhood as string) ?? undefined,
-      zip: (data.zip as string) ?? undefined,
-      houseTier: typeof data.houseTier === 'number' ? data.houseTier : undefined,
-      rehangPrice: typeof data.rehangPrice === 'number' ? data.rehangPrice : undefined,
-      lifetimeSpend: typeof data.lifetimeSpend === 'number' ? data.lifetimeSpend : undefined,
-      vip: Boolean(data.vip),
-      meta,
+    const docPath = `jobs/${docSnap.id}`
+    const prepared = safePrepareJobForFirestore(
+      { ...data, id: data.id ?? docSnap.id },
+      { docPath },
+    )
+
+    if (!prepared.success) {
+      console.error('[sync] skipped remote job', docPath, prepared.error.issues)
+      continue
     }
-    return { job: parsed, updatedAt }
-  })
+
+    const { data: sanitized, warnings } = prepared.result
+    const updatedAt = toMillis(data.updatedAt)
+    logSchemaWarnings(docPath, warnings)
+
+    const job: Job = {
+      id: sanitized.id,
+      date: sanitized.date,
+      crew: sanitized.crew,
+      client: sanitized.client,
+      scope: sanitized.scope,
+      notes: sanitized.notes,
+      address: sanitized.address,
+      neighborhood: sanitized.neighborhood,
+      zip: sanitized.zip,
+      houseTier: sanitized.houseTier,
+      rehangPrice: sanitized.rehangPrice ?? undefined,
+      lifetimeSpend: sanitized.lifetimeSpend ?? undefined,
+      vip: sanitized.vip,
+      meta: sanitized.meta,
+    }
+
+    entries.push({ job, updatedAt })
+  }
 
   await db.transaction('rw', db.jobs, async () => {
     for (const entry of entries) {
@@ -235,6 +311,7 @@ const writeRemoteJobsToDexie = async (
       }
     }
   })
+
   return entries.map((entry) => entry.job)
 }
 
@@ -455,20 +532,42 @@ export function subscribeFirestore(handlers: FirestoreSubscribeHandlers = {}): (
   }
 }
 
-const performJobWrite = async (job: Job, opId: string) => {
+const performJobWrite = async (rawJob: unknown, opId: string) => {
   if (!cloudDb) {
     throw new Error('Firestore unavailable')
   }
-  const target = doc(cloudDb, 'jobs', String(job.id))
-  const jobPayload: Job = {
-    ...job,
-    meta: job.meta ? normalizeJobMeta(job.meta) : undefined,
+
+  const rawId = (rawJob as { id?: unknown })?.id
+  const docId =
+    typeof rawId === 'number' && Number.isFinite(rawId)
+      ? String(rawId)
+      : rawId !== undefined
+        ? String(rawId)
+        : 'unknown'
+  const docPath = `jobs/${docId}`
+
+  let prepared: JobSanitizationResult
+  try {
+    prepared = prepareJobForFirestore(rawJob, { docPath })
+  } catch (error) {
+    if (error instanceof JobValidationError) {
+      handleValidationFailure(error, docPath)
+      throw error
+    }
+    throw error
   }
+
+  const { data: job, warnings, report } = prepared
+  logSchemaWarnings(docPath, warnings)
+  if (report.removedPaths.length > 0 || report.replacedNumericPaths.length > 0) {
+    notifySanitizedDoc(docPath, report)
+  }
+
   await setDoc(
-    target,
+    doc(cloudDb, 'jobs', String(job.id)),
     {
-      ...jobPayload,
-      bothCrews: jobPayload.crew === 'Both Crews',
+      ...job,
+      bothCrews: job.crew === 'Both Crews',
       updatedAt: serverTimestamp(),
       lastOpId: opId,
     },
@@ -487,10 +586,12 @@ const performPolicyUpdate = async (policy: Policy, opId: string) => {
   if (!cloudDb) {
     return
   }
+  const docPath = 'config/policy'
+  const clean = safeSerialize(stripUndefined(policy), { docPath })
   await setDoc(
     doc(cloudDb, 'config', 'policy'),
     {
-      ...policy,
+      ...clean,
       updatedAt: serverTimestamp(),
       lastOpId: opId,
     },
@@ -507,12 +608,13 @@ const performKudosReact = async (
   if (!cloudDb) {
     return
   }
+  const actor = typeof by === 'string' ? by.trim() || 'Crew' : 'Crew'
   await setDoc(
     doc(cloudDb, 'kudos', kudosId),
     {
       updatedAt: serverTimestamp(),
       lastOpId: opId,
-      lastActor: by,
+      lastActor: actor,
       [`reactions.${emoji}`]: increment(1),
     },
     { merge: true },
@@ -553,8 +655,7 @@ const performMediaUpload = async (
   })
 
   const remoteUrl = await getDownloadURL(uploadTask.snapshot.ref)
-  await setDoc(
-    doc(cloudDb, 'jobs', String(jobId), 'media', mediaId),
+  const cleanRemoteMedia = safeSerialize(
     {
       id: mediaId,
       jobId,
@@ -568,6 +669,12 @@ const performMediaUpload = async (
       updatedAt: serverTimestamp(),
       lastOpId: opId,
     },
+    { docPath: `jobs/${jobId}/media/${mediaId}` },
+  )
+
+  await setDoc(
+    doc(cloudDb, 'jobs', String(jobId), 'media', mediaId),
+    cleanRemoteMedia,
     { merge: true },
   )
   await db.media.update(mediaId, {
@@ -586,7 +693,7 @@ const runOperation = async (op: PendingOpRecord): Promise<void> => {
   switch (op.type) {
     case 'job.add':
     case 'job.update': {
-      const payload = op.payload as { job?: Job }
+      const payload = op.payload as { job?: unknown }
       if (payload?.job) {
         await performJobWrite(payload.job, op.id)
       }
@@ -639,7 +746,7 @@ export async function processPendingQueue(force = false): Promise<void> {
     return
   }
   processing = true
-  setSyncState({ status: 'pushing', lastError: null })
+  setSyncState({ status: 'pushing' })
 
   try {
     while (true) {
@@ -701,21 +808,36 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
   switch (op.type) {
     case 'job.add':
     case 'job.update':
-      payload = {
-        job: {
-          ...op.job,
-          meta: op.job.meta ? normalizeJobMeta(op.job.meta) : undefined,
-        },
+      if (!op.job) {
+        return
+      }
+      {
+        const docPath = `jobs/${op.job.id}`
+        const prepared = safePrepareJobForFirestore(op.job, { docPath })
+        if (!prepared.success) {
+          handleValidationFailure(prepared.error, docPath)
+          return
+        }
+        const { data, warnings, report } = prepared.result
+        logSchemaWarnings(docPath, warnings)
+        if (report.removedPaths.length > 0 || report.replacedNumericPaths.length > 0) {
+          notifySanitizedDoc(docPath, report)
+        }
+        payload = { job: data }
       }
       break
     case 'job.delete':
       payload = { jobId: op.jobId }
       break
     case 'policy.update':
-      payload = { policy: op.policy }
+      payload = { policy: safeSerialize(stripUndefined(op.policy)) }
       break
     case 'kudos.react':
-      payload = { kudosId: op.kudosId, emoji: op.emoji, by: op.by }
+      payload = {
+        kudosId: op.kudosId,
+        emoji: op.emoji,
+        by: typeof op.by === 'string' ? op.by.trim() : op.by,
+      }
       break
     case 'media.upload':
       payload = { mediaId: op.mediaId, jobId: op.jobId }
@@ -729,7 +851,7 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
   const record: PendingOpRecord = {
     id: randomId(),
     type: op.type,
-    payload,
+    payload: payload ? safeSerialize(payload) : undefined,
     attempt: 0,
     nextAt: now,
     createdAt: now,

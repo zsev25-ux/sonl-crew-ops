@@ -21,6 +21,7 @@ import {
   ref as storageRef,
   uploadBytes,
 } from 'firebase/storage'
+import { safeSerialize } from '@/lib/sanitize'
 
 export type JobMedia = {
   id: string
@@ -288,9 +289,13 @@ const uploadImageToFirebase = async (params: {
     thumbPath,
   }
 
+  const cleanDoc = safeSerialize(mediaDoc, {
+    docPath: `jobs/${params.jobId}/media/${id}`,
+  })
+
   await setDoc(
     doc(collection(dbInstance, 'jobs', params.jobId, 'media'), id),
-    mediaDoc,
+    cleanDoc,
   )
 
   return {
@@ -360,9 +365,13 @@ const uploadVideoToFirebase = async (params: {
     path: videoPath,
   }
 
+  const cleanDoc = safeSerialize(mediaDoc, {
+    docPath: `jobs/${params.jobId}/media/${id}`,
+  })
+
   await setDoc(
     doc(collection(dbInstance, 'jobs', params.jobId, 'media'), id),
-    mediaDoc,
+    cleanDoc,
   )
 
   return {

@@ -48,6 +48,8 @@ import {
   type SyncState,
   type PendingOpPayload,
 } from '@/lib/sync'
+import { runLocalDataCleanup } from '@/lib/maintenance'
+import { showToast } from '@/lib/toast'
 import { AnimatePresence, LayoutGroup, motion } from 'framer-motion'
 import {
   FileText,
@@ -534,20 +536,17 @@ const createEmptyForm = (
   }
 }
 
-const toOptionalString = (value: string): string | undefined => {
-  const trimmed = value.trim()
-  return trimmed ? trimmed : undefined
-}
+const toOptionalString = (value: string): string => value.trim()
 
-const toOptionalNumber = (value: string): number | undefined => {
+const toOptionalNumber = (value: string): number => {
   const trimmed = value.trim()
   if (!trimmed) {
-    return undefined
+    return 0
   }
 
   const sanitized = trimmed.replace(/[$,]/g, '')
   const parsed = Number(sanitized)
-  return Number.isFinite(parsed) ? parsed : undefined
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 const toJobPayload = (form: JobFormState): JobCore => {
@@ -4194,6 +4193,7 @@ function ProfileScreen({
   )
   const [unlockedBadge, setUnlockedBadge] = useState<AchievementKey | null>(null)
   const lastSyncLabel = useMemo(() => formatRelativeTimestamp(syncStatus.lastSyncedAt), [syncStatus.lastSyncedAt])
+  const [cleanupRunning, setCleanupRunning] = useState(false)
 
   const badgeMeta: Record<
     AchievementKey,
@@ -4230,6 +4230,24 @@ function ProfileScreen({
   }
 
   const closeModal = () => setUnlockedBadge(null)
+
+  const handleRunCleanup = async () => {
+    if (cleanupRunning) {
+      return
+    }
+    setCleanupRunning(true)
+    try {
+      const result = await runLocalDataCleanup()
+      const jobsLabel = `${result.jobsFixed} job${result.jobsFixed === 1 ? '' : 's'}`
+      const pendingLabel = `${result.pendingFixed} pending op${result.pendingFixed === 1 ? '' : 's'}`
+      showToast(`Cleanup complete: ${jobsLabel}, ${pendingLabel}.`, 'info')
+    } catch (error) {
+      console.error('Data cleanup failed', error)
+      showToast('Data cleanup failed. Check console for details.', 'error')
+    } finally {
+      setCleanupRunning(false)
+    }
+  }
 
   return (
     <div className="space-y-6 pb-24">
@@ -4335,6 +4353,15 @@ function ProfileScreen({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          {user.role === 'admin' && (
+            <Button
+              onClick={handleRunCleanup}
+              disabled={cleanupRunning}
+              className="inline-flex items-center gap-2 rounded-full border border-slate-600 bg-transparent px-5 py-2 text-sm font-semibold text-slate-200 transition hover:border-amber-400 hover:text-amber-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 disabled:opacity-60"
+            >
+              {cleanupRunning ? 'Cleaning…' : 'Run data cleanup'}
+            </Button>
+          )}
           <Button
             onClick={onSyncNow}
             disabled={syncStatus.status === 'pushing'}
