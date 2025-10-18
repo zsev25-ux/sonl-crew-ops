@@ -400,6 +400,7 @@ export async function cleanupData(): Promise<{ jobs: number; pendingOps: number 
       'lifetimeSpend',
       'vip',
       'bothCrews',
+      'materials',
       'updatedAt',
     ]
 
@@ -437,6 +438,7 @@ export async function cleanupData(): Promise<{ jobs: number; pendingOps: number 
         lifetimeSpend: normalized.lifetimeSpend,
         vip: normalized.vip,
         bothCrews: normalized.bothCrews,
+        materials: record.materials,
         updatedAt: normalized.updatedAt ?? record.updatedAt,
       }
 
