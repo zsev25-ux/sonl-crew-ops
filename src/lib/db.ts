@@ -62,17 +62,20 @@ export type UserRecord = {
   updatedAt: number
 }
 
+export type MediaStatus = 'local' | 'queued' | 'uploading' | 'synced' | 'error'
+
 export type MediaRecord = {
   id: string
-  jobId: number
-  kind: 'image' | 'video'
-  mime?: string
-  localBlob?: Blob
-  localUrl?: string
-  remoteUrl?: string
-  thumbUrl?: string
-  width?: number
-  height?: number
+  jobId?: string
+  name: string
+  type: string
+  size: number
+  blob: Blob | null
+  localUrl?: string | null
+  remoteUrl?: string | null
+  remotePath?: string | null
+  status: MediaStatus
+  error?: string | null
   createdAt: number
   updatedAt: number
 }
@@ -274,70 +277,73 @@ const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
       state: '&key',
       kudos: '&id,updatedAt',
       users: '&id,updatedAt',
-      media: '&id,jobId,updatedAt',
+      media: '&id,jobId,name,type,size,status,createdAt',
       pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
     })
     .upgrade(async (transaction) => {
-      const jobsTable = transaction.table('jobs')
-      let jobsFixed = 0
-      await jobsTable.toCollection().modify((record) => {
-        const docId = (record as { id?: unknown })?.id
-        const docPath = `dexie/jobs/${docId ?? 'unknown'}`
-        const prepared = safePrepareJobForFirestore(record, { docPath })
-        if (prepared.success) {
-          const { data } = prepared.result
-          const merged = safeSerialize({
-            ...record,
-            id: data.id,
-            date: data.date,
-            crew: data.crew,
-            client: data.client,
-            scope: data.scope,
-            notes: data.notes,
-            address: data.address,
-            neighborhood: data.neighborhood,
-            zip: data.zip,
-            houseTier: data.houseTier,
-            rehangPrice: data.rehangPrice ?? undefined,
-            lifetimeSpend: data.lifetimeSpend ?? undefined,
-            vip: data.vip,
-            bothCrews: data.crew === 'Both Crews',
-            meta: data.meta ?? (record as Record<string, unknown>).meta,
-          })
-          Object.assign(record, merged)
-          jobsFixed += 1
-        } else {
-          Object.assign(record, safeSerialize(record))
-        }
-      })
+      const mediaTable = transaction.table('media')
+      const legacyRecords = await mediaTable.toArray()
+      if (legacyRecords.length === 0) {
+        return
+      }
 
-      const pendingTable = transaction.table('pendingOps')
-      let pendingFixed = 0
-      await pendingTable.toCollection().modify((record) => {
-        if (!record || typeof record !== 'object') {
-          return
+      const now = Date.now()
+      await mediaTable.clear()
+      for (const legacy of legacyRecords) {
+        const blob =
+          legacy && 'blob' in legacy && legacy.blob instanceof Blob
+            ? (legacy.blob as Blob)
+            : legacy && 'localBlob' in legacy && legacy.localBlob instanceof Blob
+              ? (legacy.localBlob as Blob)
+              : null
+        const createdAt =
+          typeof legacy?.createdAt === 'number' ? (legacy.createdAt as number) : now
+        const id =
+          typeof legacy?.id === 'string' && legacy.id
+            ? (legacy.id as string)
+            : generateMediaId()
+        const record: MediaRecord = {
+          id,
+          jobId:
+            typeof legacy?.jobId === 'number'
+              ? String(legacy.jobId)
+              : typeof legacy?.jobId === 'string'
+                ? (legacy.jobId as string)
+                : undefined,
+          name:
+            typeof legacy?.name === 'string' && legacy.name
+              ? (legacy.name as string)
+              : id,
+          type:
+            typeof legacy?.type === 'string' && legacy.type
+              ? (legacy.type as string)
+              : typeof legacy?.mime === 'string' && legacy.mime
+                ? (legacy.mime as string)
+                : blob
+                  ? blob.type || 'application/octet-stream'
+                  : 'application/octet-stream',
+          size:
+            typeof legacy?.size === 'number'
+              ? (legacy.size as number)
+              : blob
+                ? blob.size
+                : 0,
+          blob,
+          localUrl:
+            typeof legacy?.localUrl === 'string' ? (legacy.localUrl as string) : null,
+          remoteUrl:
+            typeof legacy?.remoteUrl === 'string' ? (legacy.remoteUrl as string) : null,
+          remotePath: null,
+          status:
+            typeof legacy?.remoteUrl === 'string' && legacy.remoteUrl
+              ? 'synced'
+              : 'local',
+          error: null,
+          createdAt,
+          updatedAt: now,
         }
-        const payload = (record as { payload?: unknown }).payload
-        if (payload && typeof payload === 'object') {
-          const payloadRecord = payload as Record<string, unknown>
-          if (payloadRecord.job) {
-            const jobId = (payloadRecord.job as { id?: unknown })?.id ?? (record as { id?: string }).id
-            const prepared = safePrepareJobForFirestore(payloadRecord.job, {
-              docPath: `dexie/pending/${jobId ?? 'unknown'}`,
-            })
-            if (prepared.success) {
-              payloadRecord.job = prepared.result.data
-            } else {
-              delete payloadRecord.job
-            }
-            pendingFixed += 1
-          }
-          ;(record as Record<string, unknown>).payload = safeSerialize(payloadRecord)
-        }
-      })
 
-      if (jobsFixed || pendingFixed) {
-        console.info('[dexie-cleanup]', { jobsFixed, pendingFixed })
+        await mediaTable.put(record)
       }
     })
 
@@ -452,4 +458,53 @@ export async function updatePendingOp(
   changes: Partial<PendingOpRecord>,
 ): Promise<void> {
   await db.pendingOps.update(id, { ...changes, updatedAt: Date.now() })
+}
+
+export type MediaRow = MediaRecord
+
+export const generateMediaId = (): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+export async function addLocalMedia(file: File, jobId?: string): Promise<string> {
+  const timestamp = Date.now()
+  const record: MediaRecord = {
+    id: generateMediaId(),
+    jobId,
+    name: file.name,
+    type: file.type || 'application/octet-stream',
+    size: file.size,
+    blob: file,
+    localUrl: null,
+    remoteUrl: null,
+    remotePath: null,
+    status: 'local',
+    error: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }
+  await db.media.add(record)
+  return record.id
+}
+
+export async function setMediaStatus(
+  id: string,
+  status: MediaStatus,
+  patch: Partial<MediaRecord> = {},
+): Promise<void> {
+  await db.media.update(id, {
+    ...patch,
+    status,
+    updatedAt: Date.now(),
+  })
+}
+
+export async function getUnsyncedMedia(): Promise<MediaRow[]> {
+  return db.media
+    .where('status')
+    .notEqual('synced')
+    .toArray()
 }

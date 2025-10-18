@@ -23,3 +23,24 @@ dist-ssr
 *.sln
 *.sw?
 .env.local
+
+# Vite PWA dev build output
+dev-dist/
+
+# local backups
+.backups/
+*.backup.tsx
+*.bak
+
+# local backups
+.backups/
+*.backup.tsx
+*.bak
+# vite pwa dev
+/dev-dist/
+# ts incremental
+*.tsbuildinfo
+
+# build caches
+*.tsbuildinfo
+/dev-dist/
