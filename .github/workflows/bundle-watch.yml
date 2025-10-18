@@ -1,0 +1,152 @@
+name: Bundle Watch
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+jobs:
+  bundle-watch:
+    name: Bundle Watch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build application
+        run: pnpm build
+
+      - name: Generate bundle visualizer report
+        id: visualizer
+        run: npx vite-bundle-visualizer --open false --output bundle-visualizer.html
+
+      - name: Check bundle chunk sizes
+        id: bundle_check
+        run: |
+          set -euo pipefail
+          threshold=$((500 * 1024))
+          report_file="bundle-report.md"
+          echo "### Bundle chunk sizes (gzip)" > "$report_file"
+          echo "" >> "$report_file"
+          echo "| Chunk | Gzip size (kB) |" >> "$report_file"
+          echo "| --- | --- |" >> "$report_file"
+          status="pass"
+          fail_messages=""
+          while IFS= read -r -d '' file; do
+            rel_path=${file#dist/}
+            size=$(gzip -c "$file" | wc -c | awk '{print $1}')
+            size_kb=$(awk -v s="$size" 'BEGIN { printf "%.2f", s/1024 }')
+            echo "| ${rel_path} | ${size_kb} |" >> "$report_file"
+            if [ "$size" -gt "$threshold" ]; then
+              status="fail"
+              fail_messages="${fail_messages}- ${rel_path} – ${size_kb} kB\n"
+            fi
+          done < <(find dist/assets -type f \( -name '*.js' -o -name '*.css' \) -print0 | sort -z)
+          if [ "$status" = "fail" ]; then
+            {
+              echo "status=fail"
+              printf "details<<'EOF'\nThe following chunks exceed the 500 kB gzip limit:\n%sEOF\n" "$fail_messages"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "status=pass"
+              echo "details=All chunks are below the 500 kB gzip limit."
+            } >> "$GITHUB_OUTPUT"
+          fi
+          echo "report_file=$report_file" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bundle visualizer artifact
+        if: ${{ always() && steps.visualizer.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-visualizer-report
+          path: bundle-visualizer.html
+
+      - name: Comment on PR with bundle report
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        env:
+          STATUS: ${{ steps.bundle_check.outputs.status }}
+          DETAILS: ${{ steps.bundle_check.outputs.details }}
+          REPORT_FILE: ${{ steps.bundle_check.outputs.report_file }}
+          VISUALIZER_OUTCOME: ${{ steps.visualizer.outcome }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- bundle-watch-report -->';
+            const status = process.env.STATUS || 'unknown';
+            const details = process.env.DETAILS || '';
+            const reportFile = process.env.REPORT_FILE;
+            const visualizerOutcome = process.env.VISUALIZER_OUTCOME;
+            let table = '';
+            if (reportFile && fs.existsSync(reportFile)) {
+              table = fs.readFileSync(reportFile, 'utf8').trim();
+            }
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            let artifactLine;
+            if (visualizerOutcome === 'success') {
+              artifactLine = `[Bundle visualizer artifact](${runUrl})`;
+            } else {
+              artifactLine = 'Bundle visualizer artifact was not generated.';
+            }
+            let statusLine;
+            if (status === 'fail') {
+              statusLine = '❌ Bundle size check failed.';
+            } else if (status === 'pass') {
+              statusLine = '✅ Bundle size check passed.';
+            } else {
+              statusLine = '⚠️ Bundle size check did not run.';
+            }
+            const detailText = details.trim();
+            const parts = [
+              marker,
+              '## 📦 Bundle Watch',
+              '',
+              statusLine,
+              '',
+              artifactLine,
+            ];
+            if (detailText) {
+              parts.push('', detailText);
+            }
+            if (table) {
+              parts.push('', table);
+            }
+            const body = parts.join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(comment => comment.body && comment.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Enforce bundle size threshold
+        if: ${{ steps.bundle_check.outputs.status == 'fail' }}
+        run: |
+          echo "::error::One or more chunks exceed the 500 kB gzip limit."
+          exit 1
