@@ -122,5 +122,16 @@ export default defineConfig({
     alias: [
       { find: '@', replacement: fileURLToPath(new URL('./src', import.meta.url)) },
     ],
+  },build: {
+  chunkSizeWarningLimit: 1600,
+  rollupOptions: {
+    output: {
+      manualChunks: {
+        react: ['react', 'react-dom', 'react-router-dom'],
+        firebase: ['firebase/app', 'firebase/auth', 'firebase/firestore', 'firebase/storage'],
+      },
+    },
   },
+},
 })
+

@@ -12,12 +12,20 @@ import {
   deleteByKey,
   getPendingOpsCount,
   getPendingOpsDue,
+  setMediaStatus,
   updatePendingOp,
   type PendingOpRecord,
   type PendingOpType,
 } from '@/lib/db'
 import type { Job, Policy } from '@/lib/types'
-import { normalizeJobMeta } from '@/lib/jobmeta'
+import {
+  JobValidationError,
+  prepareJobForFirestore,
+  safePrepareJobForFirestore,
+  type JobSanitizationResult,
+} from '@/lib/job-schema'
+import { safeSerialize, stripUndefined, type SanitizationReport } from '@/lib/sanitize'
+import { showToast } from '@/lib/toast'
 import {
   collection,
   deleteDoc,
@@ -33,7 +41,6 @@ import {
   type DocumentData,
   type DocumentSnapshot,
   type QueryDocumentSnapshot,
-  type Timestamp,
   type Unsubscribe,
 } from 'firebase/firestore'
 import {
@@ -51,6 +58,7 @@ export type SyncState = {
   queued: number
   lastError: string | null
   lastSyncedAt: number | null
+  lastSanitizedAt: number | null
 }
 
 export type PendingOpPayload =
@@ -59,7 +67,7 @@ export type PendingOpPayload =
   | { type: 'job.delete'; jobId: number }
   | { type: 'policy.update'; policy: Policy }
   | { type: 'kudos.react'; kudosId: string; emoji: string; by: string }
-  | { type: 'media.upload'; mediaId: string; jobId: number }
+  | { type: 'media.upload'; mediaId: string }
   | { type: 'custom'; payload: Record<string, unknown> }
 
 const BASE_RETRY_DELAY = 1_000
@@ -73,6 +81,7 @@ let syncState: SyncState = {
   queued: 0,
   lastError: null,
   lastSyncedAt: null,
+  lastSanitizedAt: null,
 }
 
 const listeners = new Set<(state: SyncState) => void>()
@@ -116,6 +125,75 @@ const getOnlineStatus = (): boolean => {
   return navigator.onLine
 }
 
+const hasToMillis = (value: unknown): value is { toMillis: () => number } =>
+  typeof value === 'object' && value !== null && typeof (value as { toMillis?: unknown }).toMillis === 'function'
+
+const toMillisAny = (value: unknown): number | undefined => {
+  if (value == null) {
+    return undefined
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined
+  }
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  if (value instanceof Date) {
+    return value.getTime()
+  }
+  if (hasToMillis(value)) {
+    try {
+      const millis = value.toMillis()
+      return Number.isFinite(millis) ? millis : undefined
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (value === null || typeof value !== 'object') {
+    return false
+  }
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+const stripUndefinedDeep = <T>(obj: T): T => {
+  if (obj === null || typeof obj !== 'object') {
+    return obj
+  }
+
+  if (Array.isArray(obj)) {
+    const cleaned: unknown[] = []
+    for (const item of obj) {
+      const sanitized = stripUndefinedDeep(item)
+      if (sanitized !== undefined) {
+        cleaned.push(sanitized)
+      }
+    }
+    return cleaned as unknown as T
+  }
+
+  if (!isPlainObject(obj)) {
+    return obj
+  }
+
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === undefined) {
+      continue
+    }
+    const sanitized = stripUndefinedDeep(value)
+    if (sanitized !== undefined) {
+      result[key] = sanitized
+    }
+  }
+  return result as T
+}
+
 const recordLastSync = async (timestamp: number) => {
   try {
     await db.state.put({ key: LAST_SYNC_KEY, value: timestamp, updatedAt: timestamp })
@@ -147,6 +225,61 @@ const computeDelay = (attempt: number): number => {
   const base = Math.min(MAX_RETRY_DELAY, BASE_RETRY_DELAY * 2 ** attempt)
   const jitter = base * (0.5 + Math.random())
   return Math.round(Math.min(MAX_RETRY_DELAY, jitter))
+}
+
+const sanitizeNoticeCache = new Set<string>()
+const schemaWarningCache = new Set<string>()
+
+const extractFieldName = (path: string): string => {
+  const stripped = path.replace(/\[.*?\]/g, '')
+  const segments = stripped.split('.').filter(Boolean)
+  return segments[segments.length - 1] ?? stripped
+}
+
+const createSanitizeMessage = (
+  docPath: string,
+  report: SanitizationReport,
+): string | null => {
+  if (report.removedPaths.length > 0) {
+    const field = extractFieldName(report.removedPaths[0] ?? '')
+    return `Sync blocked: invalid field '${field}' (undefined). Fixed automatically and retried.`
+  }
+  if (report.replacedNumericPaths.length > 0) {
+    const field = extractFieldName(report.replacedNumericPaths[0] ?? '')
+    return `Sync blocked: invalid number in '${field}'. Fixed automatically and retried.`
+  }
+  return null
+}
+
+const notifySanitizedDoc = (docPath: string, report: SanitizationReport): void => {
+  const message = createSanitizeMessage(docPath, report)
+  if (!message) {
+    return
+  }
+  setSyncState({ lastError: message, lastSanitizedAt: Date.now() })
+  if (!sanitizeNoticeCache.has(docPath)) {
+    sanitizeNoticeCache.add(docPath)
+    showToast(message, 'warning')
+  }
+}
+
+const logSchemaWarnings = (docPath: string, warnings: string[]): void => {
+  if (warnings.length === 0 || schemaWarningCache.has(docPath)) {
+    return
+  }
+  schemaWarningCache.add(docPath)
+  console.warn('[job-schema]', docPath, warnings)
+}
+
+const handleValidationFailure = (
+  error: JobValidationError,
+  docPath: string,
+): void => {
+  const message =
+    error.message || `Sync failed: invalid data in '${docPath}'. See console for fields.`
+  console.error('[sync]', message, error.issues)
+  setSyncState({ status: 'error', lastError: message })
+  showToast(message, 'error')
 }
 
 export const updateConnectivity = (online: boolean): void => {
@@ -181,45 +314,72 @@ const scheduleWorker = async (): Promise<void> => {
   }, Math.min(delay, MAX_RETRY_DELAY))
 }
 
-const toMillis = (value: unknown): number => {
-  if (typeof value === 'number') {
-    return value
-  }
-  if (value && typeof value === 'object' && 'toMillis' in (value as Timestamp)) {
-    return (value as Timestamp).toMillis()
-  }
-  return Date.now()
-}
+const toMillis = (value: unknown): number => toMillisAny(value) ?? Date.now()
 
 const writeRemoteJobsToDexie = async (
   docs: QueryDocumentSnapshot<DocumentData>[],
 ): Promise<Job[]> => {
-  const entries = docs.map((docSnap) => {
+  const entries: { job: Job; updatedAt: number }[] = []
+
+  for (const docSnap of docs) {
     const data = docSnap.data() as Record<string, unknown>
-    const jobId = Number(data.id ?? docSnap.id)
-    const updatedAt = toMillis(data.updatedAt)
-    const meta =
-      data.meta && typeof data.meta === 'object'
-        ? normalizeJobMeta(data.meta)
-        : undefined
-    const parsed: Job = {
-      id: Number.isFinite(jobId) ? jobId : Date.now(),
-      date: String(data.date ?? ''),
-      crew: String(data.crew ?? 'Crew Alpha'),
-      client: String(data.client ?? 'Client'),
-      scope: String(data.scope ?? ''),
-      notes: (data.notes as string) ?? undefined,
-      address: (data.address as string) ?? undefined,
-      neighborhood: (data.neighborhood as string) ?? undefined,
-      zip: (data.zip as string) ?? undefined,
-      houseTier: typeof data.houseTier === 'number' ? data.houseTier : undefined,
-      rehangPrice: typeof data.rehangPrice === 'number' ? data.rehangPrice : undefined,
-      lifetimeSpend: typeof data.lifetimeSpend === 'number' ? data.lifetimeSpend : undefined,
-      vip: Boolean(data.vip),
-      meta,
+    const docPath = `jobs/${docSnap.id}`
+    const normalizedData: Record<string, unknown> = { ...data, id: data.id ?? docSnap.id }
+
+    const timeFields: Array<'updatedAt' | 'createdAt' | 'completedAt'> = [
+      'updatedAt',
+      'createdAt',
+      'completedAt',
+    ]
+
+    for (const field of timeFields) {
+      const rawValue = data[field]
+      const millis = toMillisAny(rawValue)
+      if (millis !== undefined) {
+        if (hasToMillis(rawValue) && process.env.NODE_ENV === 'development') {
+          console.info(`[sync] normalized Firestore Timestamp in ${docPath} ${field}`)
+        }
+        normalizedData[field] = millis
+      }
     }
-    return { job: parsed, updatedAt }
-  })
+    const prepared = safePrepareJobForFirestore(normalizedData, { docPath })
+
+    if (!prepared.success) {
+      const fieldTypes = timeFields.reduce<Record<string, string>>((acc, field) => {
+        const value = normalizedData[field]
+        acc[field] = value === null ? 'null' : typeof value
+        return acc
+      }, {})
+      console.error(`[sync] skipped remote job ${docPath}`, {
+        fieldTypes,
+        issues: prepared.error.issues,
+      })
+      continue
+    }
+
+    const { data: sanitized, warnings } = prepared.result
+    const updatedAt = toMillis(normalizedData.updatedAt)
+    logSchemaWarnings(docPath, warnings)
+
+    const job: Job = {
+      id: sanitized.id,
+      date: sanitized.date,
+      crew: sanitized.crew,
+      client: sanitized.client,
+      scope: sanitized.scope,
+      notes: sanitized.notes,
+      address: sanitized.address,
+      neighborhood: sanitized.neighborhood,
+      zip: sanitized.zip,
+      houseTier: sanitized.houseTier,
+      rehangPrice: sanitized.rehangPrice ?? undefined,
+      lifetimeSpend: sanitized.lifetimeSpend ?? undefined,
+      vip: sanitized.vip,
+      meta: sanitized.meta,
+    }
+
+    entries.push({ job, updatedAt })
+  }
 
   await db.transaction('rw', db.jobs, async () => {
     for (const entry of entries) {
@@ -235,6 +395,7 @@ const writeRemoteJobsToDexie = async (
       }
     }
   })
+
   return entries.map((entry) => entry.job)
 }
 
@@ -455,25 +616,45 @@ export function subscribeFirestore(handlers: FirestoreSubscribeHandlers = {}): (
   }
 }
 
-const performJobWrite = async (job: Job, opId: string) => {
+const performJobWrite = async (rawJob: unknown, opId: string) => {
   if (!cloudDb) {
     throw new Error('Firestore unavailable')
   }
-  const target = doc(cloudDb, 'jobs', String(job.id))
-  const jobPayload: Job = {
-    ...job,
-    meta: job.meta ? normalizeJobMeta(job.meta) : undefined,
+
+  const rawId = (rawJob as { id?: unknown })?.id
+  const docId =
+    typeof rawId === 'number' && Number.isFinite(rawId)
+      ? String(rawId)
+      : rawId !== undefined
+        ? String(rawId)
+        : 'unknown'
+  const docPath = `jobs/${docId}`
+
+  let prepared: JobSanitizationResult
+  try {
+    prepared = prepareJobForFirestore(rawJob, { docPath })
+  } catch (error) {
+    if (error instanceof JobValidationError) {
+      handleValidationFailure(error, docPath)
+      throw error
+    }
+    throw error
   }
-  await setDoc(
-    target,
-    {
-      ...jobPayload,
-      bothCrews: jobPayload.crew === 'Both Crews',
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
+
+  const { data: job, warnings, report } = prepared
+  logSchemaWarnings(docPath, warnings)
+  if (report.removedPaths.length > 0 || report.replacedNumericPaths.length > 0) {
+    notifySanitizedDoc(docPath, report)
+  }
+
+  const payload = stripUndefinedDeep({
+    ...job,
+    bothCrews: job.crew === 'Both Crews',
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+  })
+
+  await setDoc(doc(cloudDb, 'jobs', String(job.id)), payload, { merge: true })
 }
 
 const performJobDelete = async (jobId: number) => {
@@ -487,15 +668,15 @@ const performPolicyUpdate = async (policy: Policy, opId: string) => {
   if (!cloudDb) {
     return
   }
-  await setDoc(
-    doc(cloudDb, 'config', 'policy'),
-    {
-      ...policy,
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
+  const docPath = 'config/policy'
+  const clean = safeSerialize(stripUndefined(policy), { docPath })
+  const payload = stripUndefinedDeep({
+    ...clean,
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+  })
+
+  await setDoc(doc(cloudDb, 'config', 'policy'), payload, { merge: true })
 }
 
 const performKudosReact = async (
@@ -507,74 +688,98 @@ const performKudosReact = async (
   if (!cloudDb) {
     return
   }
-  await setDoc(
-    doc(cloudDb, 'kudos', kudosId),
-    {
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-      lastActor: by,
-      [`reactions.${emoji}`]: increment(1),
-    },
-    { merge: true },
-  )
+  const actor = typeof by === 'string' ? by.trim() || 'Crew' : 'Crew'
+  const payload = stripUndefinedDeep({
+    updatedAt: serverTimestamp(),
+    lastOpId: opId,
+    lastActor: actor,
+    [`reactions.${emoji}`]: increment(1),
+  })
+
+  await setDoc(doc(cloudDb, 'kudos', kudosId), payload, { merge: true })
 }
 
-const performMediaUpload = async (
-  mediaId: string,
-  jobId: number,
-  opId: string,
-) => {
+const processMediaUpload = async (mediaId: string, opId: string) => {
   if (!cloudDb || !cloudStorage) {
     throw new Error('Cloud storage unavailable')
   }
+
   const media = await db.media.get(mediaId)
   if (!media) {
+    await setMediaStatus(mediaId, 'error', { error: 'Local media not found' })
     throw new Error('Local media not found')
   }
-  if (!(media.localBlob instanceof Blob)) {
+
+  if (!(media.blob instanceof Blob)) {
+    await setMediaStatus(mediaId, 'error', { error: 'Local media blob missing' })
     throw new Error('Local media blob missing')
   }
 
-  const path = media.remoteUrl
-    ? media.remoteUrl
-    : `jobs/${jobId}/${opId}-${mediaId}`
-  const ref = storageRef(cloudStorage, path)
-  const uploadTask = uploadBytesResumable(ref, media.localBlob, {
-    contentType: media.mime ?? 'application/octet-stream',
+  await ensureAnonAuth()
+  const jobKey = media.jobId ?? 'general'
+  const storagePath =
+    media.remotePath && typeof media.remotePath === 'string'
+      ? media.remotePath
+      : `media/${jobKey}/${mediaId}-${media.name}`
+  const ref = storageRef(cloudStorage, storagePath)
+
+  await setMediaStatus(mediaId, 'uploading', { error: null })
+
+  const uploadTask = uploadBytesResumable(ref, media.blob, {
+    contentType: media.type || 'application/octet-stream',
   })
 
   await new Promise<void>((resolve, reject) => {
     uploadTask.on(
       'state_changed',
       undefined,
-      (error) => reject(error),
+      async (error) => {
+        await setMediaStatus(mediaId, 'error', { error: error.message })
+        reject(error)
+      },
       () => resolve(),
     )
   })
 
   const remoteUrl = await getDownloadURL(uploadTask.snapshot.ref)
-  await setDoc(
-    doc(cloudDb, 'jobs', String(jobId), 'media', mediaId),
-    {
-      id: mediaId,
-      jobId,
-      kind: media.kind,
-      mime: media.mime,
-      remoteUrl,
-      path,
-      width: media.width,
-      height: media.height,
-      name: mediaId,
-      updatedAt: serverTimestamp(),
-      lastOpId: opId,
-    },
-    { merge: true },
-  )
-  await db.media.update(mediaId, {
+  await setMediaStatus(mediaId, 'uploading', {
     remoteUrl,
-    localBlob: undefined,
-    localUrl: undefined,
-    updatedAt: Date.now(),
+    remotePath: storagePath,
+    error: null,
+  })
+
+  if (media.jobId) {
+    try {
+      await setDoc(
+        doc(cloudDb, 'jobs', String(media.jobId), 'media', mediaId),
+        {
+          id: mediaId,
+          jobId: media.jobId,
+          name: media.name,
+          type: media.type,
+          size: media.size,
+          url: remoteUrl,
+          createdAt: serverTimestamp(),
+          lastOpId: opId,
+        },
+        { merge: true },
+      )
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to persist media metadata'
+      await setMediaStatus(mediaId, 'error', {
+        remoteUrl,
+        remotePath: storagePath,
+        error: message,
+      })
+      throw error
+    }
+  }
+
+  await setMediaStatus(mediaId, 'synced', {
+    remoteUrl,
+    remotePath: storagePath,
+    error: null,
   })
 }
 
@@ -586,7 +791,7 @@ const runOperation = async (op: PendingOpRecord): Promise<void> => {
   switch (op.type) {
     case 'job.add':
     case 'job.update': {
-      const payload = op.payload as { job?: Job }
+      const payload = op.payload as { job?: unknown }
       if (payload?.job) {
         await performJobWrite(payload.job, op.id)
       }
@@ -614,9 +819,9 @@ const runOperation = async (op: PendingOpRecord): Promise<void> => {
       break
     }
     case 'media.upload': {
-      const payload = op.payload as { mediaId?: string; jobId?: number }
-      if (payload?.mediaId && typeof payload.jobId === 'number') {
-        await performMediaUpload(payload.mediaId, payload.jobId, op.id)
+      const payload = op.payload as { mediaId?: string }
+      if (typeof payload?.mediaId === 'string' && payload.mediaId) {
+        await processMediaUpload(payload.mediaId, op.id)
       }
       break
     }
@@ -639,7 +844,7 @@ export async function processPendingQueue(force = false): Promise<void> {
     return
   }
   processing = true
-  setSyncState({ status: 'pushing', lastError: null })
+  setSyncState({ status: 'pushing' })
 
   try {
     while (true) {
@@ -701,24 +906,39 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
   switch (op.type) {
     case 'job.add':
     case 'job.update':
-      payload = {
-        job: {
-          ...op.job,
-          meta: op.job.meta ? normalizeJobMeta(op.job.meta) : undefined,
-        },
+      if (!op.job) {
+        return
+      }
+      {
+        const docPath = `jobs/${op.job.id}`
+        const prepared = safePrepareJobForFirestore(op.job, { docPath })
+        if (!prepared.success) {
+          handleValidationFailure(prepared.error, docPath)
+          return
+        }
+        const { data, warnings, report } = prepared.result
+        logSchemaWarnings(docPath, warnings)
+        if (report.removedPaths.length > 0 || report.replacedNumericPaths.length > 0) {
+          notifySanitizedDoc(docPath, report)
+        }
+        payload = { job: data }
       }
       break
     case 'job.delete':
       payload = { jobId: op.jobId }
       break
     case 'policy.update':
-      payload = { policy: op.policy }
+      payload = { policy: safeSerialize(stripUndefined(op.policy)) }
       break
     case 'kudos.react':
-      payload = { kudosId: op.kudosId, emoji: op.emoji, by: op.by }
+      payload = {
+        kudosId: op.kudosId,
+        emoji: op.emoji,
+        by: typeof op.by === 'string' ? op.by.trim() : op.by,
+      }
       break
     case 'media.upload':
-      payload = { mediaId: op.mediaId, jobId: op.jobId }
+      payload = { mediaId: op.mediaId }
       break
     case 'custom':
       payload = op.payload
@@ -729,7 +949,7 @@ export async function enqueueSyncOp(op: PendingOpPayload): Promise<void> {
   const record: PendingOpRecord = {
     id: randomId(),
     type: op.type,
-    payload,
+    payload: payload ? safeSerialize(payload) : undefined,
     attempt: 0,
     nextAt: now,
     createdAt: now,
