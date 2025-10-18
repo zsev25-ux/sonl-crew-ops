@@ -27,20 +27,13 @@ dist-ssr
 # Vite PWA dev build output
 dev-dist/
 
-# local backups
+# Local backups
 .backups/
 *.backup.tsx
 *.bak
 
-# local backups
-.backups/
-*.backup.tsx
-*.bak
-# vite pwa dev
-/dev-dist/
-# ts incremental
+# TypeScript incremental builds
 *.tsbuildinfo
 
-# build caches
-*.tsbuildinfo
+# Build caches
 /dev-dist/
