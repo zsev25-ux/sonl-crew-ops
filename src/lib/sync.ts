@@ -35,11 +35,7 @@ import {
   type Timestamp,
   type Unsubscribe,
 } from 'firebase/firestore'
-import {
-  getDownloadURL,
-  ref as storageRef,
-  uploadBytesResumable,
-} from 'firebase/storage'
+import { getDownloadURL, ref as storageRef, uploadBytes } from 'firebase/storage'
 
 type SyncStatus = 'offline' | 'idle' | 'pushing' | 'pulling' | 'error'
 
@@ -696,7 +692,7 @@ const performUserAvatarUpload = async (
   const blob = await dataUrlToBlob(dataUrl, contentType)
   const path = `avatars/${userId}/${opId}.jpg`
   const ref = storageRef(cloudStorage, path)
-  await uploadBytesResumable(ref, blob, {
+  await uploadBytes(ref, blob, {
     contentType: contentType ?? blob.type ?? 'image/jpeg',
   })
   const url = await getDownloadURL(ref)

@@ -217,9 +217,9 @@ export default function CrewShell({ syncStatus }: CrewShellProps) {
       </Card>
 
       <Routes>
-        <Route path="profiles" element={<ProfilesPage users={filteredUsers} />} />
+        <Route path="/crew/profiles" element={<ProfilesPage users={filteredUsers} />} />
         <Route
-          path="profiles/:userId"
+          path="/crew/profiles/:userId"
           element={
             <ProfileDetailPage
               users={users}
@@ -230,7 +230,7 @@ export default function CrewShell({ syncStatus }: CrewShellProps) {
           }
         />
         <Route
-          path="leaderboards"
+          path="/crew/leaderboards"
           element={
             <LeaderboardsPage
               users={users}
@@ -242,10 +242,10 @@ export default function CrewShell({ syncStatus }: CrewShellProps) {
           }
         />
         <Route
-          path="awards"
+          path="/crew/awards"
           element={<AwardsPage users={users} awards={awards} policy={policy} />}
         />
-        <Route index element={<Navigate to="profiles" replace />} />
+        <Route path="/crew" element={<Navigate to="/crew/profiles" replace />} />
       </Routes>
     </div>
   )
