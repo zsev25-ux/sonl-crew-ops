@@ -403,6 +403,15 @@ export async function cleanupData(): Promise<{ jobs: number; pendingOps: number 
       'materials',
       'updatedAt',
     ]
+    const comparableJobFields = jobFields.filter(
+      (field) => field !== 'materials',
+    ) as Exclude<keyof JobRecord, 'materials'>[]
+    const materialFields: (keyof JobMaterials)[] = [
+      'zWireFt',
+      'malePlugs',
+      'femalePlugs',
+      'timers',
+    ]
 
     for (const record of jobRecords) {
       const normalized = normalizeJob({
@@ -423,6 +432,18 @@ export async function cleanupData(): Promise<{ jobs: number; pendingOps: number 
         updatedAt: record.updatedAt,
       })
 
+      let materialsChanged = false
+      let cleanedMaterials = record.materials
+      if (record.materials) {
+        const normalizedMaterials = normalizeMaterials(record.materials)
+        materialsChanged = materialFields.some(
+          (field) => record.materials?.[field] !== normalizedMaterials[field],
+        )
+        if (materialsChanged) {
+          cleanedMaterials = normalizedMaterials
+        }
+      }
+
       const cleaned: JobRecord = {
         id: normalized.id,
         date: normalized.date,
@@ -438,11 +459,13 @@ export async function cleanupData(): Promise<{ jobs: number; pendingOps: number 
         lifetimeSpend: normalized.lifetimeSpend,
         vip: normalized.vip,
         bothCrews: normalized.bothCrews,
-        materials: record.materials,
+        materials: cleanedMaterials,
         updatedAt: normalized.updatedAt ?? record.updatedAt,
       }
 
-      const changed = jobFields.some((field) => record[field] !== cleaned[field])
+      const changed =
+        materialsChanged ||
+        comparableJobFields.some((field) => record[field] !== cleaned[field])
       if (changed) {
         await db.jobs.put(cleaned)
         jobsFixed += 1
