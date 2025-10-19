@@ -2,11 +2,13 @@ import type { FirebaseApp } from 'firebase/app'
 import type { Auth } from 'firebase/auth'
 import type { Firestore } from 'firebase/firestore'
 import type { FirebaseStorage } from 'firebase/storage'
+import type { Functions } from 'firebase/functions'
 
 import { initializeApp } from 'firebase/app'
 import { getAuth, signInAnonymously } from 'firebase/auth'
 import { getFirestore } from 'firebase/firestore'
 import { getStorage } from 'firebase/storage'
+import { getFunctions } from 'firebase/functions'
 
 type FirebaseConfig = {
   apiKey: string
@@ -73,18 +75,21 @@ let app: FirebaseApp | undefined
 let authInstance: Auth | undefined
 let firestoreInstance: Firestore | undefined
 let storageInstance: FirebaseStorage | undefined
+let functionsInstance: Functions | undefined
 
 if (cloudEnabled && config) {
   app = initializeApp(config)
   authInstance = getAuth(app)
   firestoreInstance = getFirestore(app)
   storageInstance = getStorage(app)
+  functionsInstance = getFunctions(app)
 }
 
 export const firebaseApp = app
 export const auth = authInstance
 export const db = firestoreInstance
 export const storage = storageInstance
+export const functions = functionsInstance
 
 export const ensureAnonAuth = async (): Promise<void> => {
   if (!cloudEnabled || !authInstance) {

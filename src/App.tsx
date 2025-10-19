@@ -2,6 +2,8 @@ import React, {
   type ChangeEvent,
   type FormEvent,
   type RefObject,
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -76,6 +78,13 @@ import Profiles from './pages/crew/Profiles'
 import ProfileDetail from './pages/crew/ProfileDetail'
 import Leaderboards from './pages/crew/Leaderboards'
 import Awards from './pages/crew/Awards'
+
+const SparkleBoardPage = lazy(() => import('./pages/SparkleBoard'))
+const InstallBlueprintPage = lazy(() => import('./pages/InstallBlueprint'))
+
+function LazyRouteFallback() {
+  return <div className="py-12 text-center text-slate-300">Loading festive magic…</div>
+}
 
 const LOGIN_BG = '/FINEASFLOADINGSCREEN.jpg' // place the file in /public
 
@@ -4366,7 +4375,24 @@ function AppShell() {
           <Route path="/crew/profiles/:userId" element={<ProfileDetail />} />
           <Route path="/crew/leaderboards" element={<Leaderboards />} />
           <Route path="/crew/awards" element={<Awards />} />
-          <Route path="*" element={<AuthedShell user={user} onLogout={handleLogout} />} />
+          <Route path="*" element={<AuthedShell user={user} onLogout={handleLogout} />}>
+            <Route
+              path="sparkle-board"
+              element={
+                <Suspense fallback={<LazyRouteFallback />}>
+                  <SparkleBoardPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="job/:jobId/blueprint"
+              element={
+                <Suspense fallback={<LazyRouteFallback />}>
+                  <InstallBlueprintPage />
+                </Suspense>
+              }
+            />
+          </Route>
         </Routes>
       ) : (
         <LoginShell pin={pin} setPin={setPin} onLogin={handleLogin} />

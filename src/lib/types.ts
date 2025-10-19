@@ -16,6 +16,7 @@ export type JobCore = {
   lifetimeSpend?: number
   vip?: boolean
   meta?: JobMeta
+  status?: 'Pending' | 'In Progress' | 'Complete' | 'Issue'
 }
 
 export type Job = JobCore & {
@@ -33,4 +34,19 @@ export type Role = 'admin' | 'crew' | 'dispatcher' | 'support'
 export type User = {
   name: string
   role: Role
+}
+
+export type Kudos = {
+  id: string
+  targetUserId: string
+  fromUserId: string
+  message?: string
+  createdAt: string
+}
+
+export type Award = {
+  id: string
+  userId: string
+  title: string
+  awardedAt: string
 }

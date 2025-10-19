@@ -80,6 +80,12 @@ export type MediaRecord = {
   updatedAt: number
 }
 
+export type JobChecklistStateRecord = {
+  jobId: number
+  items: Record<string, boolean>
+  updatedAt: number
+}
+
 export type PendingOpType =
   | 'job.add'
   | 'job.update'
@@ -109,6 +115,7 @@ export type TableKey =
   | 'users'
   | 'media'
   | 'pendingOps'
+  | 'jobChecklistState'
 
 type TableValue =
   | JobRecord
@@ -119,6 +126,7 @@ type TableValue =
   | UserRecord
   | MediaRecord
   | PendingOpRecord
+  | JobChecklistStateRecord
 
 type UpdatableRecord = Exclude<TableValue, PendingOpRecord>
 
@@ -131,6 +139,7 @@ export class SonlCrewOpsDexie extends Dexie {
   users!: Table<UserRecord, string>
   media!: Table<MediaRecord, string>
   pendingOps!: Table<PendingOpRecord, string>
+  jobChecklistState!: Table<JobChecklistStateRecord, number>
 }
 
 const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
@@ -347,6 +356,18 @@ const configureDatabase = (database: SonlCrewOpsDexie): SonlCrewOpsDexie => {
       }
     })
 
+  database.version(5).stores({
+    jobs: '&id,date,crew,updatedAt',
+    times: '&id,jobId,start,updatedAt,[jobId+start]',
+    policy: '&key',
+    state: '&key',
+    kudos: '&id,updatedAt',
+    users: '&id,updatedAt',
+    media: '&id,jobId,name,type,size,status,createdAt',
+    pendingOps: '&queueId,type,nextAt,createdAt,updatedAt,id',
+    jobChecklistState: '&jobId,updatedAt',
+  })
+
   return database
 }
 
@@ -375,6 +396,8 @@ const readTable = <T extends TableValue>(
       return db.media as Table<T, string>
     case 'pendingOps':
       return db.pendingOps as Table<T, string>
+    case 'jobChecklistState':
+      return db.jobChecklistState as Table<T, number>
     default:
       throw new Error(`Unsupported table "${table as string}"`)
   }
