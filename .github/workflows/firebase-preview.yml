@@ -39,6 +39,7 @@ jobs:
           projectId: ${{ vars.PROJECT_ID }}
           channelId: pr-${{ github.event.pull_request.number }}
           disableComment: true
+          check_run: false
 
       - name: Comment preview URL on PR
         if: steps.firebase.outputs.details_url
