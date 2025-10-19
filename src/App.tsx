@@ -9,10 +9,10 @@ import React, {
   useMemo,
   useRef,
   useState,
-} from 'react'
-import { BrowserRouter, Route, Routes, useOutlet } from 'react-router-dom'
-import BottomNav from './components/BottomNav'
-import { Button } from '@/components/ui/button'
+} from 'react';
+import { BrowserRouter, Route, Routes, useOutlet } from 'react-router-dom';
+import BottomNav from './components/BottomNav';
+import { Button } from '@/components/ui/button';
 import {
   Card,
   CardContent,
@@ -20,10 +20,10 @@ import {
   CardFooter,
   CardHeader,
   CardTitle,
-} from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
-import { loadClientsFromFile, loadClientsFromPublic, type Client } from '@/lib/clients'
+} from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { loadClientsFromFile, loadClientsFromPublic, type Client } from '@/lib/clients';
 import {
   addLocalMedia,
   deleteMedia,
