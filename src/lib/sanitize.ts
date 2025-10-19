@@ -153,35 +153,53 @@ export function safeSerialize<T>(input: T, options: SafeSerializeOptions = {}): 
   return sanitized
 }
 
-const stripValue = (value: unknown): unknown => {
-  if (Array.isArray(value)) {
-    return value
-      .map(stripValue)
-      .filter((entry) => entry !== undefined)
+export function stripUndefined<T>(input: T): T {
+  if (input === undefined || input === null) {
+    return input
   }
-  if (isPlainObject(value)) {
-    const result: Record<string, unknown> = {}
-    Object.entries(value).forEach(([key, child]) => {
-      if (child === undefined) {
-        return
-      }
-      const stripped = stripValue(child)
-      if (stripped !== undefined) {
-        result[key] = stripped
-      }
-    })
-    return result
-  }
-  if (value instanceof Date || value === null) {
-    return value
-  }
-  if (typeof value === 'symbol' || typeof value === 'function') {
-    return undefined
-  }
-  return value
-}
 
-export const stripUndefined = <T>(input: T): T => stripValue(input) as T
+  if (typeof input === 'symbol' || typeof input === 'function') {
+    return undefined as unknown as T
+  }
+
+  if (Array.isArray(input)) {
+    const out: unknown[] = []
+    for (const value of input) {
+      if (value === undefined) {
+        continue
+      }
+      const stripped = stripUndefined(value)
+      if (stripped !== undefined) {
+        out.push(stripped)
+      }
+    }
+    return out as unknown as T
+  }
+
+  if (input instanceof Date) {
+    return input
+  }
+
+  if (typeof input === 'object') {
+    if (!isPlainObject(input)) {
+      return input
+    }
+
+    const out: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(input)) {
+      if (value === undefined) {
+        continue
+      }
+      const stripped = stripUndefined(value)
+      if (stripped !== undefined) {
+        out[key] = stripped
+      }
+    }
+    return out as unknown as T
+  }
+
+  return input
+}
 
 export class SanitizationError extends Error {
   constructor(message: string, public readonly issues: ZodIssue[]) {
