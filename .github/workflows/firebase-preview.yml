@@ -18,6 +18,7 @@ jobs:
 
       - name: Setup PNPM
         uses: pnpm/action-setup@v4
+        # PNPM version determined by packageManager in package.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
